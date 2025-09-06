@@ -5,3 +5,6 @@ Flask-Marshmallow
 marshmallow-sqlalchemy
 Flask-Cors
 yt-dlp
+psycopg2-binary
+Flask-Bcrypt
+Flask-JWT-Extended
