@@ -90,14 +90,12 @@ def start_stream():
         try:
             yt_dlp_command = [
                 'yt-dlp',
-                '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                '-f', 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4][height<=1080]/best',
                 '-g', 
                 source_url
             ]
             result = subprocess.run(yt_dlp_command, capture_output=True, text=True, check=True)
             
-            # --- THIS IS THE NEW LOGIC ---
-            # yt-dlp provides two URLs, one for video and one for audio
             stream_urls = result.stdout.strip().split('\n')
             video_url = stream_urls[0]
             if len(stream_urls) > 1:
@@ -117,26 +115,27 @@ def start_stream():
         'facebook': 'rtmps://live-api-s.facebook.com:443/rtmp/'
     }
     
-    # --- THIS IS THE FINAL FFmpeg COMMAND ---
-    # It now takes separate video and audio inputs if they exist
+    # --- Final, Optimized FFmpeg Command ---
     command = ['ffmpeg', '-re']
     
-    # Add video and audio inputs
     command.extend(['-i', video_url])
     if audio_url:
         command.extend(['-i', audio_url])
 
-    # Add encoding settings
     command.extend([
-        '-c:v', 'libx264', '-preset', 'veryfast', '-b:v', '2500k',
-        '-maxrate', '2500k', '-bufsize', '5000k', '-pix_fmt', 'yuv420p', '-g', '50'
+        '-c:v', 'libx24',
+        '-preset', 'veryfast', 
+        '-vf', 'scale=1280:720',   # <-- NEW: Downscale video to 720p
+        '-b:v', '1800k',            # <-- Adjusted bitrate for 720p
+        '-maxrate', '1800k',        # <-- Adjusted bitrate for 720p
+        '-bufsize', '3600k',        # <-- Adjusted bufsize (2x maxrate)
+        '-pix_fmt', 'yuv420p',
+        '-g', '50'
     ])
     
     if audio_url:
-        # If there was separate audio, map it and encode it
         command.extend(['-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-map', '0:v:0', '-map', '1:a:0'])
     else:
-        # If the source had combined audio/video, just re-encode the audio from that single source
         command.extend(['-c:a', 'aac', '-b:a', '128k', '-ar', '44100'])
 
     
@@ -146,7 +145,7 @@ def start_stream():
             rtmp_url = rtmp_bases[platform_lower] + key.key
             command.extend(['-f', 'flv', rtmp_url])
 
-    if len(command) < 20: # Rough check to see if any outputs were added
+    if len(command) < 20: 
          return jsonify({"error": "No valid outputs found"}), 400
 
     try:
