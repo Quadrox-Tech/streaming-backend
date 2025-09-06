@@ -3,3 +3,4 @@ gunicorn
 Flask-SQLAlchemy
 Flask-Marshmallow
 marshmallow-sqlalchemy
+Flask-Cors
