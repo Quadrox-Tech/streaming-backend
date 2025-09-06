@@ -21,7 +21,7 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 ma = Marshmallow(app)
 
-# --- Database Model ---
+# --- Database Model (Unchanged) ---
 class StreamKey(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     platform = db.Column(db.String(100), nullable=False)
@@ -33,7 +33,7 @@ class StreamKey(db.Model):
         self.name = name
         self.key = key
 
-# --- API Schema ---
+# --- API Schema (Unchanged) ---
 class StreamKeySchema(ma.SQLAlchemyAutoSchema):
     class Meta:
         model = StreamKey
@@ -83,19 +83,16 @@ def start_stream():
     if not source_url or not key_ids:
         return jsonify({"error": "Missing source_url or key_ids"}), 400
 
-    # --- NEW LOGIC TO HANDLE YOUTUBE LINKS ---
     stream_url = source_url
     if "youtube.com" in source_url or "youtu.be" in source_url:
         try:
-            # Use yt-dlp to get the direct stream URL
             yt_dlp_command = ['yt-dlp', '-g', source_url]
             result = subprocess.run(yt_dlp_command, capture_output=True, text=True, check=True)
-            stream_url = result.stdout.strip().split('\n')[-1] # Get the video-only URL
+            stream_url = result.stdout.strip().split('\n')[-1]
         except subprocess.CalledProcessError as e:
             return jsonify({"error": f"Failed to get YouTube stream URL: {e.stderr}"}), 500
         except Exception as e:
             return jsonify({"error": f"An unexpected error occurred with yt-dlp: {str(e)}"}), 500
-    # --- END OF NEW LOGIC ---
 
     keys_to_use = StreamKey.query.filter(StreamKey.id.in_(key_ids)).all()
     if not keys_to_use:
@@ -106,8 +103,15 @@ def start_stream():
         'facebook': 'rtmps://live-api-s.facebook.com:443/rtmp/'
     }
     
-    # Use the potentially translated 'stream_url' here
-    command = ['ffmpeg', '-re', '-i', stream_url, '-c', 'copy']
+    # --- THIS IS THE LINE THAT CHANGED ---
+    # We now specify to copy video but re-encode audio to AAC format
+    command = [
+        'ffmpeg', '-re', '-i', stream_url,
+        '-c:v', 'copy',      # Copy the video stream as is
+        '-c:a', 'aac',       # Re-encode the audio to AAC
+        '-ar', '44100',      # Set audio sample rate to 44.1kHz
+        '-b:a', '128k'       # Set audio bitrate to 128k for good quality
+    ]
     
     for key in keys_to_use:
         platform_lower = key.platform.lower()
@@ -115,7 +119,7 @@ def start_stream():
             rtmp_url = rtmp_bases[platform_lower] + key.key
             command.extend(['-f', 'flv', rtmp_url])
 
-    if len(command) <= 5:
+    if len(command) <= 9: # Check if any outputs were added
          return jsonify({"error": "No valid outputs found"}), 400
 
     try:
