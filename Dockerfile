@@ -1,6 +1,9 @@
 # 1. Start with an official Python base image
 FROM python:3.10-slim
 
+# Add this line to install FFmpeg
+RUN apt-get update && apt-get install -y ffmpeg
+
 # 2. Set the working directory inside the container
 WORKDIR /app
 
