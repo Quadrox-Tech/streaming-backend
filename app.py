@@ -123,12 +123,12 @@ def start_stream():
         command.extend(['-i', audio_url])
 
     command.extend([
-        '-c:v', 'libx24',
+        '-c:v', 'libx264',          # <-- TYPO CORRECTED HERE
         '-preset', 'veryfast', 
-        '-vf', 'scale=1280:720',   # <-- NEW: Downscale video to 720p
-        '-b:v', '1800k',            # <-- Adjusted bitrate for 720p
-        '-maxrate', '1800k',        # <-- Adjusted bitrate for 720p
-        '-bufsize', '3600k',        # <-- Adjusted bufsize (2x maxrate)
+        '-vf', 'scale=1280:720',
+        '-b:v', '1800k',
+        '-maxrate', '1800k',
+        '-bufsize', '3600k',
         '-pix_fmt', 'yuv420p',
         '-g', '50'
     ])
