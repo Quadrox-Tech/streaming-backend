@@ -86,9 +86,16 @@ def start_stream():
     stream_url = source_url
     if "youtube.com" in source_url or "youtu.be" in source_url:
         try:
-            yt_dlp_command = ['yt-dlp', '-g', source_url]
+            # --- THIS IS THE LINE THAT CHANGED ---
+            # We added '-f ...' to tell yt-dlp to get a format with video and audio
+            yt_dlp_command = [
+                'yt-dlp',
+                '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                '-g', 
+                source_url
+            ]
             result = subprocess.run(yt_dlp_command, capture_output=True, text=True, check=True)
-            stream_url = result.stdout.strip().split('\n')[-1]
+            stream_url = result.stdout.strip().split('\n')[0] # Use the first URL which should be video
         except subprocess.CalledProcessError as e:
             return jsonify({"error": f"Failed to get YouTube stream URL: {e.stderr}"}), 500
         except Exception as e:
@@ -103,7 +110,6 @@ def start_stream():
         'facebook': 'rtmps://live-api-s.facebook.com:443/rtmp/'
     }
     
-    # --- Updated FFmpeg Command ---
     command = [
         'ffmpeg', '-re', '-i', stream_url,
         # Video encoding settings
@@ -113,7 +119,7 @@ def start_stream():
         '-maxrate', '2500k',
         '-bufsize', '5000k',
         '-pix_fmt', 'yuv420p',
-        '-g', '50',          # <-- NEW: Force a keyframe every 50 frames (for 25fps video = 2 seconds)
+        '-g', '50',
         # Audio encoding settings
         '-c:a', 'aac',
         '-b:a', '128k',
