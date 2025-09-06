@@ -103,7 +103,7 @@ def start_stream():
         'facebook': 'rtmps://live-api-s.facebook.com:443/rtmp/'
     }
     
-    # --- THIS IS THE UPDATED, MORE ROBUST FFmpeg COMMAND ---
+    # --- Updated FFmpeg Command ---
     command = [
         'ffmpeg', '-re', '-i', stream_url,
         # Video encoding settings
@@ -113,7 +113,7 @@ def start_stream():
         '-maxrate', '2500k',
         '-bufsize', '5000k',
         '-pix_fmt', 'yuv420p',
-        '-g', '50',
+        '-g', '50',          # <-- NEW: Force a keyframe every 50 frames (for 25fps video = 2 seconds)
         # Audio encoding settings
         '-c:a', 'aac',
         '-b:a', '128k',
@@ -126,7 +126,7 @@ def start_stream():
             rtmp_url = rtmp_bases[platform_lower] + key.key
             command.extend(['-f', 'flv', rtmp_url])
 
-    if len(command) <= 17: # Check if any outputs were added
+    if len(command) <= 17:
          return jsonify({"error": "No valid outputs found"}), 400
 
     try:
