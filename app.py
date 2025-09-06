@@ -4,11 +4,11 @@ import shlex
 from flask import Flask, jsonify, request
 from flask_sqlalchemy import SQLAlchemy
 from flask_marshmallow import Marshmallow
-from flask_cors import CORS # <--- NEW
+from flask_cors import CORS
 
 # Initialize the application
 app = Flask(__name__)
-CORS(app) # <--- NEW
+CORS(app)
 
 # --- Global variable to hold the FFmpeg process ---
 stream_process = None
@@ -39,7 +39,7 @@ class StreamKeySchema(ma.SQLAlchemyAutoSchema):
         model = StreamKey
         load_instance = True
 
-# --- API Endpoints for Key Management ---
+# --- API Endpoints for Key Management (Unchanged) ---
 @app.route('/api/keys', methods=['POST'])
 def add_key():
     platform = request.json.get('platform')
@@ -68,7 +68,8 @@ def delete_key(id):
     db.session.commit()
     return jsonify({"message": "Key deleted successfully"})
 
-# --- API Endpoints for Streaming Control ---
+
+# --- API Endpoints for Streaming Control (UPDATED) ---
 @app.route('/api/stream/start', methods=['POST'])
 def start_stream():
     global stream_process
@@ -82,16 +83,31 @@ def start_stream():
     if not source_url or not key_ids:
         return jsonify({"error": "Missing source_url or key_ids"}), 400
 
+    # --- NEW LOGIC TO HANDLE YOUTUBE LINKS ---
+    stream_url = source_url
+    if "youtube.com" in source_url or "youtu.be" in source_url:
+        try:
+            # Use yt-dlp to get the direct stream URL
+            yt_dlp_command = ['yt-dlp', '-g', source_url]
+            result = subprocess.run(yt_dlp_command, capture_output=True, text=True, check=True)
+            stream_url = result.stdout.strip().split('\n')[-1] # Get the video-only URL
+        except subprocess.CalledProcessError as e:
+            return jsonify({"error": f"Failed to get YouTube stream URL: {e.stderr}"}), 500
+        except Exception as e:
+            return jsonify({"error": f"An unexpected error occurred with yt-dlp: {str(e)}"}), 500
+    # --- END OF NEW LOGIC ---
+
     keys_to_use = StreamKey.query.filter(StreamKey.id.in_(key_ids)).all()
     if not keys_to_use:
-        return jsonify({"error": "No valid stream keys found for the given IDs"}), 404
+        return jsonify({"error": "No valid stream keys found"}), 404
 
     rtmp_bases = {
         'youtube': 'rtmp://a.rtmp.youtube.com/live2/',
         'facebook': 'rtmps://live-api-s.facebook.com:443/rtmp/'
     }
     
-    command = ['ffmpeg', '-re', '-i', source_url, '-c', 'copy']
+    # Use the potentially translated 'stream_url' here
+    command = ['ffmpeg', '-re', '-i', stream_url, '-c', 'copy']
     
     for key in keys_to_use:
         platform_lower = key.platform.lower()
@@ -100,7 +116,7 @@ def start_stream():
             command.extend(['-f', 'flv', rtmp_url])
 
     if len(command) <= 5:
-         return jsonify({"error": "No outputs for supported platforms (YouTube, Facebook) found"}), 400
+         return jsonify({"error": "No valid outputs found"}), 400
 
     try:
         stream_process = subprocess.Popen(command)
@@ -108,6 +124,7 @@ def start_stream():
     except Exception as e:
         return jsonify({"error": f"Failed to start FFmpeg: {str(e)}"}), 500
 
+# --- Other endpoints are unchanged ---
 @app.route('/api/stream/stop', methods=['POST'])
 def stop_stream():
     global stream_process
