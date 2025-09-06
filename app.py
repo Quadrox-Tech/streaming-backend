@@ -103,14 +103,21 @@ def start_stream():
         'facebook': 'rtmps://live-api-s.facebook.com:443/rtmp/'
     }
     
-    # --- THIS IS THE LINE THAT CHANGED ---
-    # We now specify to copy video but re-encode audio to AAC format
+    # --- THIS IS THE UPDATED, MORE ROBUST FFmpeg COMMAND ---
     command = [
         'ffmpeg', '-re', '-i', stream_url,
-        '-c:v', 'copy',      # Copy the video stream as is
-        '-c:a', 'aac',       # Re-encode the audio to AAC
-        '-ar', '44100',      # Set audio sample rate to 44.1kHz
-        '-b:a', '128k'       # Set audio bitrate to 128k for good quality
+        # Video encoding settings
+        '-c:v', 'libx264',
+        '-preset', 'veryfast', 
+        '-b:v', '2500k',
+        '-maxrate', '2500k',
+        '-bufsize', '5000k',
+        '-pix_fmt', 'yuv420p',
+        '-g', '50',
+        # Audio encoding settings
+        '-c:a', 'aac',
+        '-b:a', '128k',
+        '-ar', '44100'
     ]
     
     for key in keys_to_use:
@@ -119,7 +126,7 @@ def start_stream():
             rtmp_url = rtmp_bases[platform_lower] + key.key
             command.extend(['-f', 'flv', rtmp_url])
 
-    if len(command) <= 9: # Check if any outputs were added
+    if len(command) <= 17: # Check if any outputs were added
          return jsonify({"error": "No valid outputs found"}), 400
 
     try:
