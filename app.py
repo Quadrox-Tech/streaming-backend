@@ -83,11 +83,11 @@ def start_stream():
     if not source_url or not key_ids:
         return jsonify({"error": "Missing source_url or key_ids"}), 400
 
-    stream_url = source_url
+    video_url = source_url
+    audio_url = None
+
     if "youtube.com" in source_url or "youtu.be" in source_url:
         try:
-            # --- THIS IS THE LINE THAT CHANGED ---
-            # We added '-f ...' to tell yt-dlp to get a format with video and audio
             yt_dlp_command = [
                 'yt-dlp',
                 '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
@@ -95,7 +95,14 @@ def start_stream():
                 source_url
             ]
             result = subprocess.run(yt_dlp_command, capture_output=True, text=True, check=True)
-            stream_url = result.stdout.strip().split('\n')[0] # Use the first URL which should be video
+            
+            # --- THIS IS THE NEW LOGIC ---
+            # yt-dlp provides two URLs, one for video and one for audio
+            stream_urls = result.stdout.strip().split('\n')
+            video_url = stream_urls[0]
+            if len(stream_urls) > 1:
+                audio_url = stream_urls[1]
+
         except subprocess.CalledProcessError as e:
             return jsonify({"error": f"Failed to get YouTube stream URL: {e.stderr}"}), 500
         except Exception as e:
@@ -110,21 +117,28 @@ def start_stream():
         'facebook': 'rtmps://live-api-s.facebook.com:443/rtmp/'
     }
     
-    command = [
-        'ffmpeg', '-re', '-i', stream_url,
-        # Video encoding settings
-        '-c:v', 'libx264',
-        '-preset', 'veryfast', 
-        '-b:v', '2500k',
-        '-maxrate', '2500k',
-        '-bufsize', '5000k',
-        '-pix_fmt', 'yuv420p',
-        '-g', '50',
-        # Audio encoding settings
-        '-c:a', 'aac',
-        '-b:a', '128k',
-        '-ar', '44100'
-    ]
+    # --- THIS IS THE FINAL FFmpeg COMMAND ---
+    # It now takes separate video and audio inputs if they exist
+    command = ['ffmpeg', '-re']
+    
+    # Add video and audio inputs
+    command.extend(['-i', video_url])
+    if audio_url:
+        command.extend(['-i', audio_url])
+
+    # Add encoding settings
+    command.extend([
+        '-c:v', 'libx264', '-preset', 'veryfast', '-b:v', '2500k',
+        '-maxrate', '2500k', '-bufsize', '5000k', '-pix_fmt', 'yuv420p', '-g', '50'
+    ])
+    
+    if audio_url:
+        # If there was separate audio, map it and encode it
+        command.extend(['-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-map', '0:v:0', '-map', '1:a:0'])
+    else:
+        # If the source had combined audio/video, just re-encode the audio from that single source
+        command.extend(['-c:a', 'aac', '-b:a', '128k', '-ar', '44100'])
+
     
     for key in keys_to_use:
         platform_lower = key.platform.lower()
@@ -132,7 +146,7 @@ def start_stream():
             rtmp_url = rtmp_bases[platform_lower] + key.key
             command.extend(['-f', 'flv', rtmp_url])
 
-    if len(command) <= 17:
+    if len(command) < 20: # Rough check to see if any outputs were added
          return jsonify({"error": "No valid outputs found"}), 400
 
     try:
