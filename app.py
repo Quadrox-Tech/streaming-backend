@@ -90,7 +90,7 @@ def start_stream():
         try:
             yt_dlp_command = [
                 'yt-dlp',
-                '-f', 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4][height<=1080]/best',
+                '-f', 'bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4][height<=720]/best',
                 '-g', 
                 source_url
             ]
@@ -115,7 +115,7 @@ def start_stream():
         'facebook': 'rtmps://live-api-s.facebook.com:443/rtmp/'
     }
     
-    # --- Final, Optimized FFmpeg Command ---
+    # --- Final, Optimized FFmpeg Command for 480p ---
     command = ['ffmpeg', '-re']
     
     command.extend(['-i', video_url])
@@ -123,12 +123,12 @@ def start_stream():
         command.extend(['-i', audio_url])
 
     command.extend([
-        '-c:v', 'libx264',          # <-- TYPO CORRECTED HERE
+        '-c:v', 'libx264',
         '-preset', 'veryfast', 
-        '-vf', 'scale=1280:720',
-        '-b:v', '1800k',
-        '-maxrate', '1800k',
-        '-bufsize', '3600k',
+        '-vf', 'scale=854:480',      # <-- NEW: Downscale video to 480p
+        '-b:v', '900k',             # <-- Adjusted bitrate for 480p
+        '-maxrate', '900k',         # <-- Adjusted bitrate for 480p
+        '-bufsize', '1800k',        # <-- Adjusted bufsize (2x maxrate)
         '-pix_fmt', 'yuv420p',
         '-g', '50'
     ])
