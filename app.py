@@ -175,11 +175,12 @@ def delete_connected_account(id):
 def youtube_connect():
     client_config = {"web": {"client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET, "auth_uri": "https://accounts.google.com/o/oauth2/auth", "token_uri": "https://oauth2.googleapis.com/token", "redirect_uris": [REDIRECT_URI]}}
     
-    ### FIX ### Changed to the single, all-powerful YouTube scope
+    ### FIX ### Using the broader scopes you requested
     flow = Flow.from_client_config(
         client_config, 
         scopes=[
-            "https://www.googleapis.com/auth/youtube", 
+            "https://www.googleapis.com/auth/youtube",
+            "https://www.googleapis.com/auth/youtube.force-ssl",
             "https://www.googleapis.com/auth/userinfo.profile"
         ], 
         redirect_uri=REDIRECT_URI
@@ -320,5 +321,3 @@ with app.app_context():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000)
-
-
