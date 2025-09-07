@@ -175,7 +175,6 @@ def delete_connected_account(id):
 def youtube_connect():
     client_config = {"web": {"client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET, "auth_uri": "https://accounts.google.com/o/oauth2/auth", "token_uri": "https://oauth2.googleapis.com/token", "redirect_uris": [REDIRECT_URI]}}
     
-    ### FIX ### The scopes list was updated to include youtube.upload for live streaming
     flow = Flow.from_client_config(
         client_config, 
         scopes=[
@@ -292,7 +291,7 @@ def start_stream(broadcast_id):
     
     for dest in destinations:
         if dest.platform.lower() in rtmp_bases: command.extend(['-f', 'flv', rtmp_bases[dest.platform.lower()] + dest.stream_key])
-    
+
     try:
         process = subprocess.Popen(command); stream_processes[broadcast_id] = process
         broadcast.status = 'live'; broadcast.start_time = datetime.utcnow(); db.session.commit()
@@ -321,4 +320,5 @@ with app.app_context():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000)
-```eof
+
+
