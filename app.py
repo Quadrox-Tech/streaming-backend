@@ -26,7 +26,7 @@ GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
 GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET')
 # This must match what you put in the Google Cloud Console
 # IMPORTANT: Remember to change 'yourdomain.com' to your actual domain
-REDIRECT_URI = 'https://yourdomain.com/youtube-callback.html' 
+REDIRECT_URI = 'https://smartnaijaservices.com.ng/youtube-callback.html' 
 
 db = SQLAlchemy(app)
 ma = Marshmallow(app)
@@ -34,6 +34,7 @@ bcrypt = Bcrypt(app)
 jwt = JWTManager(app)
 
 stream_processes = {}
+# Simple dictionary to store state for OAuth flow. In production, use Redis or a database.
 oauth_states = {}
 
 # --- Database Models ---
@@ -50,8 +51,11 @@ class User(db.Model):
     def __init__(self, email, full_name, password=None):
         self.email = email
         self.full_name = full_name
-        if password: self.password_hash = bcrypt.generate_password_hash(password).decode('utf-8')
-    def check_password(self, password): return bcrypt.check_password_hash(self.password_hash, password)
+        if password:
+            self.password_hash = bcrypt.generate_password_hash(password).decode('utf-8')
+
+    def check_password(self, password):
+        return bcrypt.check_password_hash(self.password_hash, password)
 
 class Destination(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -288,12 +292,14 @@ def stop_stream(broadcast_id):
     if broadcast_id in stream_processes: del stream_processes[broadcast_id]
     return jsonify({"message": "Stream stopped"})
 
-# --- Health Check & DB Creation ---
+# --- Health Check ---
 @app.route('/')
 def status(): return jsonify({"status": "API is online"})
 
-with app.context():
+# --- Create DB ---
+with app.app_context():
     db.create_all()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000)
+
