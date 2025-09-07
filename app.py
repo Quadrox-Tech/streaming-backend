@@ -82,8 +82,8 @@ class BroadcastSchema(ma.SQLAlchemyAutoSchema):
     class Meta: model = Broadcast; include_fk = True
 
 user_schema=UserSchema()
-single_destination_schema = DestinationSchema() # For single object responses
-destinations_schema=DestinationSchema(many=True) # For list responses
+single_destination_schema = DestinationSchema()
+destinations_schema=DestinationSchema(many=True)
 video_schema=VideoSchema(many=True)
 broadcasts_schema=BroadcastSchema(many=True)
 single_broadcast_schema = BroadcastSchema()
@@ -240,4 +240,3 @@ def stop_stream(broadcast_id):
 def status(): return jsonify({"status": "API is online"})
 with app.app_context(): db.create_all()
 if __name__ == '__main__': app.run(host='0.0.0.0', port=8000)
-
