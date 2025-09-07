@@ -174,7 +174,17 @@ def delete_connected_account(id):
 @jwt_required()
 def youtube_connect():
     client_config = {"web": {"client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET, "auth_uri": "https://accounts.google.com/o/oauth2/auth", "token_uri": "https://oauth2.googleapis.com/token", "redirect_uris": [REDIRECT_URI]}}
-    flow = Flow.from_client_config(client_config, scopes=["https://www.googleapis.com/auth/youtube.readonly", "https://www.googleapis.com/auth/userinfo.profile"], redirect_uri=REDIRECT_URI)
+    
+    ### FIX ### The scopes list was updated to include youtube.upload for live streaming
+    flow = Flow.from_client_config(
+        client_config, 
+        scopes=[
+            "https://www.googleapis.com/auth/youtube.upload", 
+            "https://www.googleapis.com/auth/youtube.readonly", 
+            "https://www.googleapis.com/auth/userinfo.profile"
+        ], 
+        redirect_uri=REDIRECT_URI
+    )
     authorization_url, state = flow.authorization_url(access_type='offline', include_granted_scopes='true')
     oauth_states[state] = get_jwt_identity()
     return jsonify({'authorization_url': authorization_url})
@@ -208,14 +218,12 @@ def get_all_possible_destinations():
         try:
             creds = Credentials(None, refresh_token=account.refresh_token, token_uri='https://oauth2.googleapis.com/token', client_id=GOOGLE_CLIENT_ID, client_secret=GOOGLE_CLIENT_SECRET)
             youtube = build('youtube', 'v3', credentials=creds)
-            # ### FIX ### The part parameter was too minimal. It needs 'id' and 'snippet' as well.
             streams_response = youtube.liveStreams().list(part='id,snippet,status', mine=True).execute()
             if streams_response.get('items'):
                 dest_info.update({"eligible": True, "reason": ""})
             else:
                 dest_info.update({"eligible": False, "reason": "Channel not enabled for live streaming."})
         except HttpError as e:
-            # Added more detailed error logging for future debugging
             print(f"YouTube API HttpError: {e}")
             dest_info.update({"eligible": False, "reason": "API Error: Could not verify channel."})
         all_destinations.append(dest_info)
@@ -284,7 +292,7 @@ def start_stream(broadcast_id):
     
     for dest in destinations:
         if dest.platform.lower() in rtmp_bases: command.extend(['-f', 'flv', rtmp_bases[dest.platform.lower()] + dest.stream_key])
-
+    
     try:
         process = subprocess.Popen(command); stream_processes[broadcast_id] = process
         broadcast.status = 'live'; broadcast.start_time = datetime.utcnow(); db.session.commit()
@@ -313,5 +321,4 @@ with app.app_context():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000)
-
-
+```eof
