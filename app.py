@@ -208,12 +208,15 @@ def get_all_possible_destinations():
         try:
             creds = Credentials(None, refresh_token=account.refresh_token, token_uri='https://oauth2.googleapis.com/token', client_id=GOOGLE_CLIENT_ID, client_secret=GOOGLE_CLIENT_SECRET)
             youtube = build('youtube', 'v3', credentials=creds)
-            streams_response = youtube.liveStreams().list(part='status', mine=True).execute()
+            # ### FIX ### The part parameter was too minimal. It needs 'id' and 'snippet' as well.
+            streams_response = youtube.liveStreams().list(part='id,snippet,status', mine=True).execute()
             if streams_response.get('items'):
                 dest_info.update({"eligible": True, "reason": ""})
             else:
                 dest_info.update({"eligible": False, "reason": "Channel not enabled for live streaming."})
-        except HttpError:
+        except HttpError as e:
+            # Added more detailed error logging for future debugging
+            print(f"YouTube API HttpError: {e}")
             dest_info.update({"eligible": False, "reason": "API Error: Could not verify channel."})
         all_destinations.append(dest_info)
     return jsonify(all_destinations)
@@ -229,16 +232,13 @@ def create_broadcast():
     title = data.get('title'); source_url = data.get('source_url'); dest_ids = data.get('destination_ids'); resolution = data.get('resolution', '480p')
     if not all([title, source_url, dest_ids]): return jsonify({"error": "Missing required fields"}), 400
     
-    # This logic now needs to handle the mixed IDs like "manual-1" and "youtube-2"
     dest_names = []
-    # In a real app, you'd fetch details again, but for now we can infer from the ID
     for dest_id in dest_ids:
         if dest_id.startswith('manual-'):
             db_id = int(dest_id.split('-')[1])
             dest = Destination.query.filter_by(id=db_id, user_id=user_id).first()
             if dest: dest_names.append(f"{dest.platform}: {dest.name}")
         elif dest_id.startswith('youtube-'):
-            # For now, we just add a placeholder. The streaming logic would need to be updated to handle this.
              dest_names.append("YouTube: Connected Account")
 
     broadcast = Broadcast(user_id=user_id, source_url=source_url, title=title, destinations_used=", ".join(dest_names), resolution=resolution)
@@ -284,8 +284,6 @@ def start_stream(broadcast_id):
     
     for dest in destinations:
         if dest.platform.lower() in rtmp_bases: command.extend(['-f', 'flv', rtmp_bases[dest.platform.lower()] + dest.stream_key])
-    
-    # NOTE: Streaming to connected accounts via API is a separate, complex feature not included in this FFmpeg command.
 
     try:
         process = subprocess.Popen(command); stream_processes[broadcast_id] = process
