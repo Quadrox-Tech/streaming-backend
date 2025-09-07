@@ -8,7 +8,7 @@ from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identi
 from datetime import timedelta
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
-import requests # Make sure this is imported
+import requests
 
 # --- App Initialization ---
 app = Flask(__name__)
@@ -34,6 +34,7 @@ class User(db.Model):
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(128), nullable=True)
     created_at = db.Column(db.DateTime, server_default=db.func.now())
+    destinations = db.relationship('Destination', backref='user', lazy=True, cascade="all, delete-orphan")
 
     def __init__(self, email, full_name, password=None):
         self.email = email
@@ -44,15 +45,30 @@ class User(db.Model):
     def check_password(self, password):
         return bcrypt.check_password_hash(self.password_hash, password)
 
+# --- NEW: Destination Model ---
+class Destination(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    platform = db.Column(db.String(100), nullable=False)
+    name = db.Column(db.String(100), nullable=False)
+    stream_key = db.Column(db.String(200), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+
 # --- API Schemas ---
 class UserSchema(ma.SQLAlchemyAutoSchema):
     class Meta:
         model = User
         fields = ("id", "full_name", "email", "created_at")
 
-user_schema = UserSchema()
+class DestinationSchema(ma.SQLAlchemyAutoSchema):
+    class Meta:
+        model = Destination
+        include_fk = True
 
-# --- Auth Endpoints ---
+user_schema = UserSchema()
+destination_schema = DestinationSchema()
+destinations_schema = DestinationSchema(many=True)
+
+# --- Auth Endpoints (Unchanged) ---
 @app.route('/api/auth/register', methods=['POST'])
 def register_user():
     data = request.get_json()
@@ -99,9 +115,9 @@ def google_auth():
     except ValueError as e:
         return jsonify({"error": f"Token verification failed: {e}"}), 401
 
-# --- NEW: User Profile Endpoint ---
+# --- User Profile Endpoint (Unchanged) ---
 @app.route('/api/user/profile', methods=['GET'])
-@jwt_required() # This protects the route
+@jwt_required()
 def get_user_profile():
     user_id = get_jwt_identity()
     user = User.query.get(user_id)
@@ -109,12 +125,49 @@ def get_user_profile():
         return jsonify({"error": "User not found"}), 404
     return jsonify(user_schema.dump(user))
 
+# --- NEW: Destination Endpoints ---
+@app.route('/api/destinations', methods=['POST'])
+@jwt_required()
+def add_destination():
+    user_id = get_jwt_identity()
+    data = request.get_json()
+    platform = data.get('platform')
+    name = data.get('name')
+    stream_key = data.get('stream_key')
+
+    if not all([platform, name, stream_key]):
+        return jsonify({"error": "All fields are required"}), 400
+    
+    new_destination = Destination(platform=platform, name=name, stream_key=stream_key, user_id=user_id)
+    db.session.add(new_destination)
+    db.session.commit()
+    return jsonify(destination_schema.dump(new_destination)), 201
+
+@app.route('/api/destinations', methods=['GET'])
+@jwt_required()
+def get_destinations():
+    user_id = get_jwt_identity()
+    destinations = Destination.query.filter_by(user_id=user_id).all()
+    return jsonify(destinations_schema.dump(destinations))
+
+@app.route('/api/destinations/<int:id>', methods=['DELETE'])
+@jwt_required()
+def delete_destination(id):
+    user_id = get_jwt_identity()
+    destination = Destination.query.filter_by(id=id, user_id=user_id).first()
+    if not destination:
+        return jsonify({"error": "Destination not found"}), 404
+    
+    db.session.delete(destination)
+    db.session.commit()
+    return jsonify({"message": "Destination deleted"}), 200
+
 # --- Health Check ---
 @app.route('/')
 def status():
     return jsonify({"status": "API is online"})
 
-# --- Create Database ---
+# --- Create Database Tables ---
 with app.app_context():
     db.create_all()
 
