@@ -16,6 +16,7 @@ from googleapiclient.errors import HttpError
 from google.oauth2.credentials import Credentials
 import requests
 import uuid
+import json
 
 # --- App Initialization & Config ---
 app = Flask(__name__)
@@ -77,9 +78,11 @@ class Broadcast(db.Model):
     start_time = db.Column(db.DateTime, nullable=True)
     end_time = db.Column(db.DateTime, nullable=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    destinations_used = db.Column(db.Text, nullable=True)
+    destinations_used = db.Column(db.Text, nullable=True) # For display
+    destination_ids_used = db.Column(db.Text, nullable=True) # For logic
 
 # --- API Schemas ---
+# ... (Schemas remain the same) ...
 class UserSchema(ma.SQLAlchemyAutoSchema):
     class Meta: model = User; fields = ("id", "full_name", "email")
 class DestinationSchema(ma.SQLAlchemyAutoSchema):
@@ -94,6 +97,7 @@ class BroadcastSchema(ma.SQLAlchemyAutoSchema):
 user_schema=UserSchema(); destinations_schema=DestinationSchema(many=True); connected_account_schema = ConnectedAccountSchema(many=True); single_destination_schema=DestinationSchema(); video_schema=VideoSchema(many=True); broadcasts_schema=BroadcastSchema(many=True); single_broadcast_schema = BroadcastSchema()
 
 # --- Auth Endpoints ---
+# ... (Auth endpoints remain the same) ...
 @app.route('/api/auth/register', methods=['POST'])
 def register_user():
     data = request.get_json(); full_name = data.get('full_name'); email = data.get('email'); password = data.get('password')
@@ -122,7 +126,8 @@ def google_auth():
         return jsonify(access_token=create_access_token(identity=str(user.id)))
     except ValueError: return jsonify({"error": "Token verification failed"}), 401
 
-# --- User Profile Endpoint ---
+# --- User Profile & Connections Endpoints ---
+# ... (These endpoints remain the same) ...
 @app.route('/api/user/profile', methods=['GET', 'PUT'])
 @jwt_required()
 def user_profile():
@@ -135,7 +140,6 @@ def user_profile():
         return jsonify({"message": "Profile updated successfully"}), 200
     if request.method == 'GET': return jsonify(user_schema.dump(user))
 
-# --- Destination & Connection Endpoints ---
 @app.route('/api/destinations', methods=['GET', 'POST'])
 @jwt_required()
 def handle_destinations():
@@ -174,17 +178,7 @@ def delete_connected_account(id):
 @jwt_required()
 def youtube_connect():
     client_config = {"web": {"client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET, "auth_uri": "https://accounts.google.com/o/oauth2/auth", "token_uri": "https://oauth2.googleapis.com/token", "redirect_uris": [REDIRECT_URI]}}
-    
-    ### FIX ### Using the broader scopes you requested
-    flow = Flow.from_client_config(
-        client_config, 
-        scopes=[
-            "https://www.googleapis.com/auth/youtube",
-            "https://www.googleapis.com/auth/youtube.force-ssl",
-            "https://www.googleapis.com/auth/userinfo.profile"
-        ], 
-        redirect_uri=REDIRECT_URI
-    )
+    flow = Flow.from_client_config(client_config, scopes=["https://www.googleapis.com/auth/youtube", "https://www.googleapis.com/auth/youtube.force-ssl", "https://www.googleapis.com/auth/userinfo.profile"], redirect_uri=REDIRECT_URI)
     authorization_url, state = flow.authorization_url(access_type='offline', prompt='consent', include_granted_scopes='true')
     oauth_states[state] = get_jwt_identity()
     return jsonify({'authorization_url': authorization_url})
@@ -219,37 +213,37 @@ def get_all_possible_destinations():
             creds = Credentials(None, refresh_token=account.refresh_token, token_uri='https://oauth2.googleapis.com/token', client_id=GOOGLE_CLIENT_ID, client_secret=GOOGLE_CLIENT_SECRET)
             youtube = build('youtube', 'v3', credentials=creds)
             streams_response = youtube.liveStreams().list(part='id,snippet,status', mine=True).execute()
-            if streams_response.get('items'):
-                dest_info.update({"eligible": True, "reason": ""})
-            else:
-                dest_info.update({"eligible": False, "reason": "Channel not enabled for live streaming."})
+            if streams_response.get('items'): dest_info.update({"eligible": True, "reason": ""})
+            else: dest_info.update({"eligible": False, "reason": "Channel not enabled for live streaming."})
         except HttpError as e:
             print(f"YouTube API HttpError: {e}")
             dest_info.update({"eligible": False, "reason": "API Error: Could not verify channel."})
         all_destinations.append(dest_info)
     return jsonify(all_destinations)
 
-# --- Other Endpoints (Video, Broadcasts) ---
-@app.route('/api/videos', methods=['GET'])
-@jwt_required()
-def get_videos(): return jsonify(video_schema.dump(Video.query.filter_by(user_id=get_jwt_identity()).all()))
+# --- Broadcast & Streaming Endpoints ---
 @app.route('/api/broadcasts', methods=['POST'])
 @jwt_required()
 def create_broadcast():
     user_id = get_jwt_identity(); data = request.get_json()
-    title = data.get('title'); source_url = data.get('source_url'); dest_ids = data.get('destination_ids'); resolution = data.get('resolution', '480p')
-    if not all([title, source_url, dest_ids]): return jsonify({"error": "Missing required fields"}), 400
+    title = data.get('title'); source_url = data.get('source_url'); destination_ids = data.get('destination_ids'); resolution = data.get('resolution', '480p')
+    if not all([title, source_url, destination_ids]): return jsonify({"error": "Missing required fields"}), 400
     
+    # Logic to generate the display name for the broadcast
     dest_names = []
-    for dest_id in dest_ids:
-        if dest_id.startswith('manual-'):
-            db_id = int(dest_id.split('-')[1])
-            dest = Destination.query.filter_by(id=db_id, user_id=user_id).first()
-            if dest: dest_names.append(f"{dest.platform}: {dest.name}")
-        elif dest_id.startswith('youtube-'):
-             dest_names.append("YouTube: Connected Account")
+    for dest_id_str in destination_ids:
+        if dest_id_str.startswith('manual-'):
+            db_id = int(dest_id_str.split('-')[1])
+            dest = Destination.query.get(db_id)
+            if dest and str(dest.user_id) == user_id: dest_names.append(f"{dest.platform}: {dest.name}")
+        elif dest_id_str.startswith('youtube-'):
+            db_id = int(dest_id_str.split('-')[1])
+            acc = ConnectedAccount.query.get(db_id)
+            if acc and str(acc.user_id) == user_id: dest_names.append(f"YouTube: {acc.account_name}")
 
-    broadcast = Broadcast(user_id=user_id, source_url=source_url, title=title, destinations_used=", ".join(dest_names), resolution=resolution)
+    if not dest_names: return jsonify({"error": "Invalid destination IDs"}), 400
+    
+    broadcast = Broadcast(user_id=user_id, source_url=source_url, title=title, destinations_used=", ".join(dest_names), destination_ids_used=json.dumps(destination_ids), resolution=resolution)
     db.session.add(broadcast); db.session.commit()
     return jsonify(single_broadcast_schema.dump(broadcast)), 201
 
@@ -264,12 +258,69 @@ def get_broadcasts():
 @jwt_required()
 def start_stream(broadcast_id):
     user_id = get_jwt_identity()
-    broadcast = Broadcast.query.filter_by(id=broadcast_id, user_id=user_id).first()
-    if not broadcast or broadcast.status != 'pending': return jsonify({"error": "Broadcast not found or not pending"}), 404
-    if broadcast_id in stream_processes and stream_processes[broadcast_id].poll() is None: return jsonify({"error": "Stream already running"}), 400
+    broadcast = Broadcast.query.get(broadcast_id)
+    if not broadcast or str(broadcast.user_id) != user_id or broadcast.status != 'pending':
+        return jsonify({"error": "Broadcast not found or not pending"}), 404
+    if broadcast_id in stream_processes and stream_processes.get(broadcast_id).poll() is None:
+        return jsonify({"error": "Stream already running"}), 400
+
+    rtmp_outputs = []
+    destination_ids = json.loads(broadcast.destination_ids_used)
+
+    # ### START of API-driven streaming logic ###
+    for dest_id_str in destination_ids:
+        if dest_id_str.startswith('manual-'):
+            db_id = int(dest_id_str.split('-')[1])
+            dest = Destination.query.get(db_id)
+            rtmp_bases = {'facebook': 'rtmps://live-api-s.facebook.com:443/rtmp/', 'twitch': 'rtmp://live.twitch.tv/app/'}
+            if dest and dest.platform.lower() in rtmp_bases:
+                rtmp_outputs.append(rtmp_bases[dest.platform.lower()] + dest.stream_key)
+            elif dest: # Generic RTMP
+                 rtmp_outputs.append(dest.stream_key)
+
+        elif dest_id_str.startswith('youtube-'):
+            db_id = int(dest_id_str.split('-')[1])
+            account = ConnectedAccount.query.get(db_id)
+            if not account: continue
+
+            try:
+                creds = Credentials(None, refresh_token=account.refresh_token, token_uri='https://oauth2.googleapis.com/token', client_id=GOOGLE_CLIENT_ID, client_secret=GOOGLE_CLIENT_SECRET)
+                youtube = build('youtube', 'v3', credentials=creds)
+                
+                broadcast_insert = youtube.liveBroadcasts().insert(
+                    part="snippet,status",
+                    body={
+                        "snippet": {"title": broadcast.title, "scheduledStartTime": datetime.utcnow().isoformat() + "Z"},
+                        "status": {"privacyStatus": "private"}
+                    }).execute()
+                broadcast_yt_id = broadcast_insert['id']
+
+                stream_insert = youtube.liveStreams().insert(
+                    part="snippet,cdn",
+                    body={
+                        "snippet": {"title": broadcast.title},
+                        "cdn": {"format": broadcast.resolution, "ingestionType": "rtmp"}
+                    }).execute()
+                stream_yt_id = stream_insert['id']
+                
+                youtube.liveBroadcasts().bind(
+                    part="id,snippet,contentDetails,status",
+                    id=broadcast_yt_id,
+                    streamId=stream_yt_id
+                ).execute()
+
+                ingestion_address = stream_insert['cdn']['ingestionInfo']['ingestionAddress']
+                stream_name = stream_insert['cdn']['ingestionInfo']['streamName']
+                rtmp_outputs.append(f"{ingestion_address}/{stream_name}")
+
+            except HttpError as e:
+                print(f"YouTube API error on stream creation: {e}")
+                return jsonify({"error": "Failed to create YouTube live stream via API."}), 500
     
-    dest_names_from_db = [name.strip().split(": ")[1] for name in broadcast.destinations_used.split(", ") if "YouTube" not in name]
-    destinations = Destination.query.filter(Destination.name.in_(dest_names_from_db), Destination.user_id == user_id).all()
+    if not rtmp_outputs:
+        return jsonify({"error": "No valid stream destinations found to start the broadcast."}), 400
+
+    # ### END of API-driven streaming logic ###
     
     video_url = broadcast.source_url; audio_url = None
     if "youtube.com" in video_url or "youtu.be" in video_url:
@@ -283,15 +334,14 @@ def start_stream(broadcast_id):
     settings = {'scale': '854:480', 'bitrate': '900k', 'bufsize': '1800k'}
     if broadcast.resolution == '720p': settings = {'scale': '1280:720', 'bitrate': '1800k', 'bufsize': '3600k'}
 
-    rtmp_bases = {'youtube': 'rtmp://a.rtmp.youtube.com/live2/', 'facebook': 'rtmps://live-api-s.facebook.com:443/rtmp/', 'twitch': 'rtmp://live.twitch.tv/app/'}
     command = ['ffmpeg', '-re', '-i', video_url]
     if audio_url: command.extend(['-i', audio_url])
     command.extend(['-c:v', 'libx264', '-preset', 'veryfast', '-vf', f"scale={settings['scale']}", '-b:v', settings['bitrate'], '-maxrate', settings['bitrate'], '-bufsize', settings['bufsize'], '-pix_fmt', 'yuv420p', '-g', '50'])
     if audio_url: command.extend(['-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-map', '0:v:0', '-map', '1:a:0'])
     else: command.extend(['-c:a', 'aac', '-b:a', '128k', '-ar', '44100'])
     
-    for dest in destinations:
-        if dest.platform.lower() in rtmp_bases: command.extend(['-f', 'flv', rtmp_bases[dest.platform.lower()] + dest.stream_key])
+    for rtmp_url in rtmp_outputs:
+        command.extend(['-f', 'flv', rtmp_url])
 
     try:
         process = subprocess.Popen(command); stream_processes[broadcast_id] = process
@@ -302,10 +352,13 @@ def start_stream(broadcast_id):
 @app.route('/api/broadcasts/<int:broadcast_id>/stop', methods=['POST'])
 @jwt_required()
 def stop_stream(broadcast_id):
-    broadcast = Broadcast.query.filter_by(id=broadcast_id, user_id=get_jwt_identity()).first()
-    if not broadcast: return jsonify({"error": "Broadcast not found"}), 404
+    broadcast = Broadcast.query.get(broadcast_id)
+    if not broadcast or str(broadcast.user_id) != get_jwt_identity():
+        return jsonify({"error": "Broadcast not found"}), 404
     process = stream_processes.get(broadcast_id)
-    if process and process.poll() is None: process.terminate(); process.wait()
+    if process and process.poll() is None:
+        process.terminate()
+        process.wait()
     broadcast.status = 'finished'; broadcast.end_time = datetime.utcnow()
     db.session.commit()
     if broadcast_id in stream_processes: del stream_processes[broadcast_id]
