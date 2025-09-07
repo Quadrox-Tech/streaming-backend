@@ -34,7 +34,6 @@ bcrypt = Bcrypt(app)
 jwt = JWTManager(app)
 
 stream_processes = {}
-# Simple dictionary to store state for OAuth flow. In production, use Redis or a database.
 oauth_states = {}
 
 # --- Database Models ---
@@ -51,11 +50,8 @@ class User(db.Model):
     def __init__(self, email, full_name, password=None):
         self.email = email
         self.full_name = full_name
-        if password:
-            self.password_hash = bcrypt.generate_password_hash(password).decode('utf-8')
-
-    def check_password(self, password):
-        return bcrypt.check_password_hash(self.password_hash, password)
+        if password: self.password_hash = bcrypt.generate_password_hash(password).decode('utf-8')
+    def check_password(self, password): return bcrypt.check_password_hash(self.password_hash, password)
 
 class Destination(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -145,13 +141,10 @@ def get_destinations():
 @app.route('/api/destinations', methods=['POST'])
 @jwt_required()
 def add_destination():
-    user_id = get_jwt_identity()
-    data = request.get_json()
-    platform = data.get('platform'); name = data.get('name'); stream_key = data.get('stream_key')
+    user_id = get_jwt_identity(); data = request.get_json(); platform = data.get('platform'); name = data.get('name'); stream_key = data.get('stream_key')
     if not all([platform, name, stream_key]): return jsonify({"error": "All fields are required"}), 400
     new_destination = Destination(platform=platform, name=name, stream_key=stream_key, user_id=user_id)
-    db.session.add(new_destination)
-    db.session.commit()
+    db.session.add(new_destination); db.session.commit()
     return jsonify(single_destination_schema.dump(new_destination)), 201
 
 @app.route('/api/destinations/<int:id>', methods=['DELETE'])
@@ -159,8 +152,7 @@ def add_destination():
 def delete_destination(id):
     destination = Destination.query.filter_by(id=id, user_id=get_jwt_identity()).first()
     if not destination: return jsonify({"error": "Destination not found"}), 404
-    db.session.delete(destination)
-    db.session.commit()
+    db.session.delete(destination); db.session.commit()
     return jsonify({"message": "Destination deleted"}), 200
 
 # --- Video Library Endpoints ---
@@ -187,9 +179,8 @@ def youtube_connect():
         redirect_uri=REDIRECT_URI
     )
     authorization_url, state = flow.authorization_url(access_type='offline', include_granted_scopes='true')
-    
     user_id = get_jwt_identity()
-    oauth_states[state] = user_id # Store user_id with the state
+    oauth_states[state] = user_id
     return jsonify({'authorization_url': authorization_url})
 
 @app.route('/api/connect/youtube/callback')
@@ -300,6 +291,9 @@ def stop_stream(broadcast_id):
 # --- Health Check & DB Creation ---
 @app.route('/')
 def status(): return jsonify({"status": "API is online"})
-with app.app.context(): db.create_all()
-if __name__ == '__main__': app.run(host='0.0.0.0', port=8000)
 
+with app.context():
+    db.create_all()
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8000)
