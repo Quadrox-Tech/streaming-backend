@@ -34,7 +34,6 @@ bcrypt = Bcrypt(app)
 jwt = JWTManager(app)
 
 stream_processes = {}
-# Simple dictionary to store state for OAuth flow. In production, use Redis or a database.
 oauth_states = {}
 
 # --- Database Models ---
@@ -46,7 +45,6 @@ class User(db.Model):
     destinations = db.relationship('Destination', backref='user', lazy=True, cascade="all, delete-orphan")
     broadcasts = db.relationship('Broadcast', backref='user', lazy=True, cascade="all, delete-orphan")
     videos = db.relationship('Video', backref='user', lazy=True, cascade="all, delete-orphan")
-    connected_accounts = db.relationship('ConnectedAccount', backref='user', lazy=True, cascade="all, delete-orphan")
 
     def __init__(self, email, full_name, password=None):
         self.email = email
@@ -69,13 +67,6 @@ class Video(db.Model):
     file_name = db.Column(db.String(255), nullable=False)
     video_url = db.Column(db.String(500), nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-
-class ConnectedAccount(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    platform = db.Column(db.String(50), nullable=False)
-    account_name = db.Column(db.String(100), nullable=False)
-    refresh_token = db.Column(db.String(500), nullable=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     
 class Broadcast(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -93,14 +84,12 @@ class UserSchema(ma.SQLAlchemyAutoSchema):
     class Meta: model = User; fields = ("id", "full_name", "email")
 class DestinationSchema(ma.SQLAlchemyAutoSchema):
     class Meta: model = Destination; include_fk = True
-class ConnectedAccountSchema(ma.SQLAlchemyAutoSchema):
-    class Meta: model = ConnectedAccount; include_fk = True
 class VideoSchema(ma.SQLAlchemyAutoSchema):
     class Meta: model = Video; include_fk = True
 class BroadcastSchema(ma.SQLAlchemyAutoSchema):
     class Meta: model = Broadcast; include_fk = True
 
-user_schema=UserSchema(); single_destination_schema=DestinationSchema(); destinations_schema=DestinationSchema(many=True); connected_account_schema=ConnectedAccountSchema(many=True); video_schema=VideoSchema(many=True); broadcasts_schema=BroadcastSchema(many=True); single_broadcast_schema=BroadcastSchema()
+user_schema=UserSchema(); single_destination_schema=DestinationSchema(); destinations_schema=DestinationSchema(many=True); video_schema=VideoSchema(many=True); broadcasts_schema=BroadcastSchema(many=True); single_broadcast_schema = BroadcastSchema()
 
 # --- Auth Endpoints ---
 @app.route('/api/auth/register', methods=['POST'])
@@ -163,56 +152,6 @@ def delete_destination(id):
 @app.route('/api/videos', methods=['GET'])
 @jwt_required()
 def get_videos(): return jsonify(video_schema.dump(Video.query.filter_by(user_id=get_jwt_identity()).all()))
-
-# --- YouTube Connection Endpoints ---
-@app.route('/api/connect/youtube', methods=['GET'])
-@jwt_required()
-def youtube_connect():
-    client_config = {
-        "web": {
-            "client_id": GOOGLE_CLIENT_ID,
-            "client_secret": GOOGLE_CLIENT_SECRET,
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "redirect_uris": [REDIRECT_URI],
-        }
-    }
-    flow = Flow.from_client_config(
-        client_config,
-        scopes=["https://www.googleapis.com/auth/youtube.readonly", "https://www.googleapis.com/auth/userinfo.profile", "https://www.googleapis.com/auth/userinfo.email"],
-        redirect_uri=REDIRECT_URI
-    )
-    authorization_url, state = flow.authorization_url(access_type='offline', include_granted_scopes='true')
-    user_id = get_jwt_identity()
-    oauth_states[state] = user_id
-    return jsonify({'authorization_url': authorization_url})
-
-@app.route('/api/connect/youtube/callback')
-def youtube_callback():
-    state = request.args.get('state')
-    user_id = oauth_states.pop(state, None)
-    if not user_id: return "Error: State mismatch or user ID not found.", 400
-
-    client_config = { "web": { "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET } }
-    flow = Flow.from_client_config(client_config, scopes=None, state=state, redirect_uri=REDIRECT_URI)
-    flow.fetch_token(authorization_response=request.url)
-    credentials = flow.credentials
-    refresh_token = credentials.refresh_token
-
-    user_info_service = build('oauth2', 'v2', credentials=credentials)
-    user_info = user_info_service.userinfo().get().execute()
-    account_name = user_info.get('name', 'YouTube Account')
-    
-    existing_account = ConnectedAccount.query.filter_by(user_id=user_id, platform='YouTube').first()
-    if existing_account:
-        existing_account.refresh_token = refresh_token
-        existing_account.account_name = account_name
-    else:
-        new_account = ConnectedAccount(platform='YouTube', account_name=account_name, refresh_token=refresh_token, user_id=user_id)
-        db.session.add(new_account)
-    
-    db.session.commit()
-    return redirect('/destinations.html')
 
 # --- Broadcast & Streaming Endpoints ---
 @app.route('/api/broadcasts', methods=['POST'])
@@ -297,9 +236,8 @@ def stop_stream(broadcast_id):
 def status(): return jsonify({"status": "API is online"})
 
 # --- Create DB ---
-with app.app_context():
+with app.app_context(): # CORRECTED LINE
     db.create_all()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000)
-
