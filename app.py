@@ -32,7 +32,6 @@ bcrypt = Bcrypt(app)
 jwt = JWTManager(app)
 
 stream_processes = {}
-# Simple dictionary for state. In production, you might use Redis or a database.
 oauth_states = {}
 
 # --- Database Models ---
@@ -44,7 +43,6 @@ class User(db.Model):
     destinations = db.relationship('Destination', backref='user', lazy=True, cascade="all, delete-orphan")
     broadcasts = db.relationship('Broadcast', backref='user', lazy=True, cascade="all, delete-orphan")
     videos = db.relationship('Video', backref='user', lazy=True, cascade="all, delete-orphan")
-    ### NEW ### - Add relationship to ConnectedAccount
     connected_accounts = db.relationship('ConnectedAccount', backref='user', lazy=True, cascade="all, delete-orphan")
 
     def __init__(self, email, full_name, password=None):
@@ -69,7 +67,6 @@ class Video(db.Model):
     video_url = db.Column(db.String(500), nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
 
-### NEW ### - Database model to store connected accounts (e.g., YouTube)
 class ConnectedAccount(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     platform = db.Column(db.String(50), nullable=False)
@@ -93,16 +90,14 @@ class UserSchema(ma.SQLAlchemyAutoSchema):
     class Meta: model = User; fields = ("id", "full_name", "email")
 class DestinationSchema(ma.SQLAlchemyAutoSchema):
     class Meta: model = Destination; include_fk = True
-### NEW ### - Schema for the ConnectedAccount model
 class ConnectedAccountSchema(ma.SQLAlchemyAutoSchema):
-    class Meta: model = ConnectedAccount; include_fk = True
+    class Meta: model = ConnectedAccount; fields = ("id", "platform", "account_name")
 class VideoSchema(ma.SQLAlchemyAutoSchema):
     class Meta: model = Video; include_fk = True
 class BroadcastSchema(ma.SQLAlchemyAutoSchema):
     class Meta: model = Broadcast; include_fk = True
 
 user_schema=UserSchema(); single_destination_schema=DestinationSchema(); destinations_schema=DestinationSchema(many=True); video_schema=VideoSchema(many=True); broadcasts_schema=BroadcastSchema(many=True); single_broadcast_schema = BroadcastSchema()
-### NEW ### - Initialize the new schema
 connected_account_schema = ConnectedAccountSchema(many=True)
 
 # --- Auth Endpoints ---
@@ -181,7 +176,7 @@ def delete_destination(id):
 @jwt_required()
 def get_videos(): return jsonify(video_schema.dump(Video.query.filter_by(user_id=get_jwt_identity()).all()))
 
-### NEW ### - YouTube Connection Endpoints
+# --- YouTube Connection Endpoints ---
 @app.route('/api/connect/youtube', methods=['GET'])
 @jwt_required()
 def youtube_connect():
@@ -202,7 +197,7 @@ def youtube_connect():
     authorization_url, state = flow.authorization_url(access_type='offline', include_granted_scopes='true')
     
     user_id = get_jwt_identity()
-    oauth_states[state] = user_id # Store user_id with the state for security
+    oauth_states[state] = user_id
     return jsonify({'authorization_url': authorization_url})
 
 @app.route('/api/connect/youtube/callback')
@@ -231,8 +226,14 @@ def youtube_callback():
         db.session.add(new_account)
     
     db.session.commit()
-    # Redirect to the profile page to show the new connection
-    return redirect('/profile.html') 
+    return redirect('https://smartnaijaservices.com.ng/profile.html') 
+
+@app.route('/api/connected-accounts', methods=['GET'])
+@jwt_required()
+def get_connected_accounts():
+    user_id = get_jwt_identity()
+    accounts = ConnectedAccount.query.filter_by(user_id=user_id).all()
+    return jsonify(connected_account_schema.dump(accounts))
 
 # --- Broadcast & Streaming Endpoints ---
 @app.route('/api/broadcasts', methods=['POST'])
