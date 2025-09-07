@@ -78,8 +78,8 @@ class Broadcast(db.Model):
     start_time = db.Column(db.DateTime, nullable=True)
     end_time = db.Column(db.DateTime, nullable=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    destinations_used = db.Column(db.Text, nullable=True) # For display
-    destination_ids_used = db.Column(db.Text, nullable=True) # For logic
+    destinations_used = db.Column(db.Text, nullable=True)
+    destination_ids_used = db.Column(db.Text, nullable=True)
 
 # --- API Schemas ---
 class UserSchema(ma.SQLAlchemyAutoSchema):
@@ -250,7 +250,6 @@ def get_broadcasts():
     broadcasts = Broadcast.query.filter(Broadcast.user_id == get_jwt_identity(),(Broadcast.start_time > thirty_days_ago) | (Broadcast.status == 'live') | (Broadcast.status == 'pending')).order_by(db.desc(Broadcast.id)).all()
     return jsonify(broadcasts_schema.dump(broadcasts))
 
-### FIX ###: THIS ENTIRE FUNCTION HAS BEEN REWRITTEN FOR ROBUSTNESS
 @app.route('/api/broadcasts/<int:broadcast_id>/start', methods=['POST'])
 @jwt_required()
 def start_stream(broadcast_id):
@@ -259,9 +258,6 @@ def start_stream(broadcast_id):
     if not broadcast or str(broadcast.user_id) != user_id or broadcast.status != 'pending':
         return jsonify({"error": "Broadcast not found or not pending"}), 404
 
-    # Use a background process runner like threading in a real app
-    # For now, we run it directly but with better error handling.
-    
     try:
         rtmp_outputs = []
         destination_ids = json.loads(broadcast.destination_ids_used)
@@ -270,24 +266,38 @@ def start_stream(broadcast_id):
             if dest_id_str.startswith('manual-'):
                 db_id = int(dest_id_str.split('-')[1])
                 dest = Destination.query.get(db_id)
-                # This logic is simplified; you'd map platforms to their full RTMP base URLs
                 if dest: rtmp_outputs.append(dest.stream_key)
 
             elif dest_id_str.startswith('youtube-'):
                 db_id = int(dest_id_str.split('-')[1])
                 account = ConnectedAccount.query.get(db_id)
                 if not account: continue
-
+                
                 creds = Credentials(None, refresh_token=account.refresh_token, token_uri='https://oauth2.googleapis.com/token', client_id=GOOGLE_CLIENT_ID, client_secret=GOOGLE_CLIENT_SECRET)
                 youtube = build('youtube', 'v3', credentials=creds)
                 
-                broadcast_insert = youtube.liveBroadcasts().insert(part="snippet,status,contentDetails", body={"snippet": {"title": broadcast.title, "scheduledStartTime": datetime.utcnow().isoformat() + "Z"}, "status": {"privacyStatus": "private"}, "contentDetails": {"enableAutoStart": True}}).execute()
+                # ### FIX ###: Removed `"contentDetails": {"enableAutoStart": True}` to fix the resolution error
+                broadcast_insert = youtube.liveBroadcasts().insert(
+                    part="snippet,status",
+                    body={
+                        "snippet": {"title": broadcast.title, "scheduledStartTime": datetime.utcnow().isoformat() + "Z"},
+                        "status": {"privacyStatus": "private"}
+                    }).execute()
                 broadcast_yt_id = broadcast_insert['id']
 
-                stream_insert = youtube.liveStreams().insert(part="snippet,cdn", body={"snippet": {"title": broadcast.title}, "cdn": {"format": broadcast.resolution, "ingestionType": "rtmp"}}).execute()
+                stream_insert = youtube.liveStreams().insert(
+                    part="snippet,cdn",
+                    body={
+                        "snippet": {"title": broadcast.title},
+                        "cdn": {"format": broadcast.resolution, "ingestionType": "rtmp"}
+                    }).execute()
                 stream_yt_id = stream_insert['id']
                 
-                youtube.liveBroadcasts().bind(part="id", id=broadcast_yt_id, streamId=stream_yt_id).execute()
+                youtube.liveBroadcasts().bind(
+                    part="id",
+                    id=broadcast_yt_id,
+                    streamId=stream_yt_id
+                ).execute()
 
                 ingestion_address = stream_insert['cdn']['ingestionInfo']['ingestionAddress']
                 stream_name = stream_insert['cdn']['ingestionInfo']['streamName']
@@ -303,7 +313,7 @@ def start_stream(broadcast_id):
             urls = result.stdout.strip().split('\n')
             video_url = urls[0]
             if len(urls) > 1: audio_url = urls[1]
-        else: # Assuming it's a direct URL if not from YouTube
+        else:
             video_url = broadcast.source_url
 
         settings = {'scale': '854:480', 'bitrate': '900k', 'bufsize': '1800k'}
@@ -317,25 +327,15 @@ def start_stream(broadcast_id):
         for rtmp_url in rtmp_outputs:
             command.extend(['-f', 'flv', rtmp_url])
 
-        # This part should be moved to a background worker in a real app
         broadcast.status = 'live'; broadcast.start_time = datetime.utcnow(); db.session.commit()
         
         print("--- Starting FFmpeg with command: ---")
-        print(shlex.join(command)) # Log the exact command for debugging
-
-        # Use subprocess.run for better error feedback during this phase
-        result = subprocess.run(command, capture_output=True, text=True)
+        print(shlex.join(command))
         
-        if result.returncode != 0:
-            # If FFmpeg fails, log the error and update status
-            print("--- FFmpeg Error ---")
-            print(result.stderr)
-            broadcast.status = 'failed'; db.session.commit()
-            return jsonify({"error": "FFmpeg failed to start.", "details": result.stderr}), 500
-
-        # This part will only be reached if the stream finishes successfully
-        broadcast.status = 'finished'; broadcast.end_time = datetime.utcnow(); db.session.commit()
-        return jsonify({"message": "Stream finished successfully."})
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stream_processes[broadcast_id] = process
+        
+        return jsonify({"message": "Stream started"})
 
     except subprocess.CalledProcessError as e:
         broadcast.status = 'failed'; db.session.commit()
@@ -353,16 +353,17 @@ def start_stream(broadcast_id):
 @app.route('/api/broadcasts/<int:broadcast_id>/stop', methods=['POST'])
 @jwt_required()
 def stop_stream(broadcast_id):
-    # This endpoint is more for future use if we switch to background Popen
     broadcast = Broadcast.query.get(broadcast_id)
     if not broadcast or str(broadcast.user_id) != get_jwt_identity():
         return jsonify({"error": "Broadcast not found"}), 404
-    
-    # In a Popen model, we would terminate the process here.
-    # Since we are using a blocking `run`, this is less critical now.
+    process = stream_processes.get(broadcast_id)
+    if process and process.poll() is None:
+        process.terminate()
+        process.wait()
     broadcast.status = 'finished'; broadcast.end_time = datetime.utcnow()
     db.session.commit()
-    return jsonify({"message": "Stream stopped (or was already finished)."}), 200
+    if broadcast_id in stream_processes: del stream_processes[broadcast_id]
+    return jsonify({"message": "Stream stopped"})
 
 # --- Health Check ---
 @app.route('/')
@@ -374,5 +375,3 @@ with app.app_context():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000)
-
-
