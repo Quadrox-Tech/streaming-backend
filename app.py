@@ -24,8 +24,6 @@ app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY', 'default-super-s
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=24)
 GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
 GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET')
-# This must match what you put in the Google Cloud Console
-# IMPORTANT: Remember to change 'yourdomain.com' to your actual domain
 REDIRECT_URI = 'https://smartnaijaservices.com.ng/youtube-callback.html' 
 
 db = SQLAlchemy(app)
@@ -34,6 +32,7 @@ bcrypt = Bcrypt(app)
 jwt = JWTManager(app)
 
 stream_processes = {}
+# Simple dictionary for state. In production, you might use Redis or a database.
 oauth_states = {}
 
 # --- Database Models ---
@@ -45,6 +44,8 @@ class User(db.Model):
     destinations = db.relationship('Destination', backref='user', lazy=True, cascade="all, delete-orphan")
     broadcasts = db.relationship('Broadcast', backref='user', lazy=True, cascade="all, delete-orphan")
     videos = db.relationship('Video', backref='user', lazy=True, cascade="all, delete-orphan")
+    ### NEW ### - Add relationship to ConnectedAccount
+    connected_accounts = db.relationship('ConnectedAccount', backref='user', lazy=True, cascade="all, delete-orphan")
 
     def __init__(self, email, full_name, password=None):
         self.email = email
@@ -67,6 +68,14 @@ class Video(db.Model):
     file_name = db.Column(db.String(255), nullable=False)
     video_url = db.Column(db.String(500), nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+
+### NEW ### - Database model to store connected accounts (e.g., YouTube)
+class ConnectedAccount(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    platform = db.Column(db.String(50), nullable=False)
+    account_name = db.Column(db.String(100), nullable=False)
+    refresh_token = db.Column(db.String(500), nullable=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     
 class Broadcast(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -84,12 +93,17 @@ class UserSchema(ma.SQLAlchemyAutoSchema):
     class Meta: model = User; fields = ("id", "full_name", "email")
 class DestinationSchema(ma.SQLAlchemyAutoSchema):
     class Meta: model = Destination; include_fk = True
+### NEW ### - Schema for the ConnectedAccount model
+class ConnectedAccountSchema(ma.SQLAlchemyAutoSchema):
+    class Meta: model = ConnectedAccount; include_fk = True
 class VideoSchema(ma.SQLAlchemyAutoSchema):
     class Meta: model = Video; include_fk = True
 class BroadcastSchema(ma.SQLAlchemyAutoSchema):
     class Meta: model = Broadcast; include_fk = True
 
 user_schema=UserSchema(); single_destination_schema=DestinationSchema(); destinations_schema=DestinationSchema(many=True); video_schema=VideoSchema(many=True); broadcasts_schema=BroadcastSchema(many=True); single_broadcast_schema = BroadcastSchema()
+### NEW ### - Initialize the new schema
+connected_account_schema = ConnectedAccountSchema(many=True)
 
 # --- Auth Endpoints ---
 @app.route('/api/auth/register', methods=['POST'])
@@ -128,19 +142,14 @@ def user_profile():
     user = User.query.get(user_id)
     if not user:
         return jsonify({"error": "User not found"}), 404
-
-    # Handle PUT request for updating the profile
     if request.method == 'PUT':
         data = request.get_json()
         new_name = data.get('full_name')
         if not new_name:
             return jsonify({"error": "Full name is required"}), 400
-        
         user.full_name = new_name
         db.session.commit()
         return jsonify({"message": "Profile updated successfully"}), 200
-
-    # Handle GET request (original functionality)
     if request.method == 'GET':
         return jsonify(user_schema.dump(user))
 
@@ -171,6 +180,59 @@ def delete_destination(id):
 @app.route('/api/videos', methods=['GET'])
 @jwt_required()
 def get_videos(): return jsonify(video_schema.dump(Video.query.filter_by(user_id=get_jwt_identity()).all()))
+
+### NEW ### - YouTube Connection Endpoints
+@app.route('/api/connect/youtube', methods=['GET'])
+@jwt_required()
+def youtube_connect():
+    client_config = {
+        "web": {
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": [REDIRECT_URI],
+        }
+    }
+    flow = Flow.from_client_config(
+        client_config,
+        scopes=["https://www.googleapis.com/auth/youtube.readonly", "https://www.googleapis.com/auth/userinfo.profile"],
+        redirect_uri=REDIRECT_URI
+    )
+    authorization_url, state = flow.authorization_url(access_type='offline', include_granted_scopes='true')
+    
+    user_id = get_jwt_identity()
+    oauth_states[state] = user_id # Store user_id with the state for security
+    return jsonify({'authorization_url': authorization_url})
+
+@app.route('/api/connect/youtube/callback')
+def youtube_callback():
+    state = request.args.get('state')
+    user_id = oauth_states.pop(state, None)
+    if not user_id: return "Error: State mismatch or user ID not found.", 400
+
+    client_config = { "web": { "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET, "token_uri": "https://oauth2.googleapis.com/token" } }
+    flow = Flow.from_client_config(client_config, scopes=None, state=state, redirect_uri=REDIRECT_URI)
+    flow.fetch_token(authorization_response=request.url)
+    
+    credentials = flow.credentials
+    refresh_token = credentials.refresh_token
+
+    user_info_service = build('oauth2', 'v2', credentials=credentials)
+    user_info = user_info_service.userinfo().get().execute()
+    account_name = user_info.get('name', 'YouTube Account')
+    
+    existing_account = ConnectedAccount.query.filter_by(user_id=user_id, platform='YouTube').first()
+    if existing_account:
+        existing_account.refresh_token = refresh_token
+        existing_account.account_name = account_name
+    else:
+        new_account = ConnectedAccount(platform='YouTube', account_name=account_name, refresh_token=refresh_token, user_id=user_id)
+        db.session.add(new_account)
+    
+    db.session.commit()
+    # Redirect to the profile page to show the new connection
+    return redirect('/profile.html') 
 
 # --- Broadcast & Streaming Endpoints ---
 @app.route('/api/broadcasts', methods=['POST'])
