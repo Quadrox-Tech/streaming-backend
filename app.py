@@ -25,6 +25,7 @@ app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=24)
 GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
 GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET')
 REDIRECT_URI = 'https://smartnaijaservices.com.ng/youtube-callback.html' 
+FRONTEND_URL = 'https://smartnaijaservices.com.ng' # Added for robust redirects
 
 db = SQLAlchemy(app)
 ma = Marshmallow(app)
@@ -206,7 +207,16 @@ def youtube_callback():
     user_id = oauth_states.pop(state, None)
     if not user_id: return "Error: State mismatch or user ID not found.", 400
 
-    client_config = { "web": { "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET, "token_uri": "https://oauth2.googleapis.com/token" } }
+    # ### FIX ### - This client_config was incomplete, it's now correct.
+    client_config = {
+        "web": {
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": [REDIRECT_URI],
+        }
+    }
     flow = Flow.from_client_config(client_config, scopes=None, state=state, redirect_uri=REDIRECT_URI)
     flow.fetch_token(authorization_response=request.url)
     
@@ -226,7 +236,8 @@ def youtube_callback():
         db.session.add(new_account)
     
     db.session.commit()
-    return redirect('https://smartnaijaservices.com.ng/profile.html') 
+    # ### FIX ### - Changed to a full, absolute URL redirect
+    return redirect(f'{FRONTEND_URL}/profile.html') 
 
 @app.route('/api/connected-accounts', methods=['GET'])
 @jwt_required()
@@ -323,4 +334,5 @@ with app.app_context():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000)
+
 
