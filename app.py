@@ -45,7 +45,6 @@ class User(db.Model):
     def check_password(self, password):
         return bcrypt.check_password_hash(self.password_hash, password)
 
-# --- NEW: Destination Model ---
 class Destination(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     platform = db.Column(db.String(100), nullable=False)
@@ -68,7 +67,7 @@ user_schema = UserSchema()
 destination_schema = DestinationSchema()
 destinations_schema = DestinationSchema(many=True)
 
-# --- Auth Endpoints (Unchanged) ---
+# --- Auth Endpoints ---
 @app.route('/api/auth/register', methods=['POST'])
 def register_user():
     data = request.get_json()
@@ -93,7 +92,8 @@ def login_user():
         return jsonify({"error": "Email and password are required"}), 400
     user = User.query.filter_by(email=email).first()
     if user and user.password_hash and user.check_password(password):
-        access_token = create_access_token(identity=user.id)
+        # --- FIX #1 HERE ---
+        access_token = create_access_token(identity=str(user.id)) # Convert user.id to string
         return jsonify(access_token=access_token)
     return jsonify({"error": "Invalid email or password"}), 401
     
@@ -110,12 +110,13 @@ def google_auth():
             user = User(email=email, full_name=full_name)
             db.session.add(user)
             db.session.commit()
-        access_token = create_access_token(identity=user.id)
+        # --- FIX #2 HERE ---
+        access_token = create_access_token(identity=str(user.id)) # Convert user.id to string
         return jsonify(access_token=access_token)
     except ValueError as e:
         return jsonify({"error": f"Token verification failed: {e}"}), 401
 
-# --- User Profile Endpoint (Unchanged) ---
+# --- User Profile Endpoint ---
 @app.route('/api/user/profile', methods=['GET'])
 @jwt_required()
 def get_user_profile():
@@ -125,7 +126,7 @@ def get_user_profile():
         return jsonify({"error": "User not found"}), 404
     return jsonify(user_schema.dump(user))
 
-# --- NEW: Destination Endpoints ---
+# --- Destination Endpoints ---
 @app.route('/api/destinations', methods=['POST'])
 @jwt_required()
 def add_destination():
