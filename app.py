@@ -121,9 +121,28 @@ def google_auth():
     except ValueError: return jsonify({"error": "Token verification failed"}), 401
 
 # --- User Profile Endpoint ---
-@app.route('/api/user/profile', methods=['GET'])
+@app.route('/api/user/profile', methods=['GET', 'PUT'])
 @jwt_required()
-def get_user_profile(): return jsonify(user_schema.dump(User.query.get(get_jwt_identity())))
+def user_profile():
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    # Handle PUT request for updating the profile
+    if request.method == 'PUT':
+        data = request.get_json()
+        new_name = data.get('full_name')
+        if not new_name:
+            return jsonify({"error": "Full name is required"}), 400
+        
+        user.full_name = new_name
+        db.session.commit()
+        return jsonify({"message": "Profile updated successfully"}), 200
+
+    # Handle GET request (original functionality)
+    if request.method == 'GET':
+        return jsonify(user_schema.dump(user))
 
 # --- Destination Endpoints ---
 @app.route('/api/destinations', methods=['GET'])
@@ -236,8 +255,9 @@ def stop_stream(broadcast_id):
 def status(): return jsonify({"status": "API is online"})
 
 # --- Create DB ---
-with app.app_context(): # CORRECTED LINE
+with app.app_context():
     db.create_all()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000)
+
