@@ -8,6 +8,9 @@ from flask_cors import CORS
 from flask_bcrypt import Bcrypt
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity, JWTManager
 from datetime import timedelta, datetime
+from google.oauth2 import id_token  # <--- THIS LINE WAS MISSING
+from google.auth.transport import requests as google_requests
+import requests
 
 # --- App Initialization & Config ---
 app = Flask(__name__)
