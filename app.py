@@ -26,7 +26,6 @@ ma = Marshmallow(app)
 bcrypt = Bcrypt(app)
 jwt = JWTManager(app)
 
-# Global dictionary to hold running FFmpeg processes, keyed by broadcast_id
 stream_processes = {}
 
 # --- Database Models ---
@@ -35,19 +34,9 @@ class User(db.Model):
     full_name = db.Column(db.String(100), nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(128), nullable=True)
-    created_at = db.Column(db.DateTime, server_default=db.func.now())
     destinations = db.relationship('Destination', backref='user', lazy=True, cascade="all, delete-orphan")
     broadcasts = db.relationship('Broadcast', backref='user', lazy=True, cascade="all, delete-orphan")
     videos = db.relationship('Video', backref='user', lazy=True, cascade="all, delete-orphan")
-
-    def __init__(self, email, full_name, password=None):
-        self.email = email
-        self.full_name = full_name
-        if password:
-            self.password_hash = bcrypt.generate_password_hash(password).decode('utf-8')
-
-    def check_password(self, password):
-        return bcrypt.check_password_hash(self.password_hash, password)
 
 class Destination(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -59,14 +48,15 @@ class Destination(db.Model):
 class Video(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     file_name = db.Column(db.String(255), nullable=False)
-    video_url = db.Column(db.String(500), nullable=False) # This would be the URL from your cloud storage
+    video_url = db.Column(db.String(500), nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
 
 class Broadcast(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     title = db.Column(db.String(200), nullable=False)
-    status = db.Column(db.String(20), nullable=False, default='pending') # pending, live, finished
+    status = db.Column(db.String(20), nullable=False, default='pending')
     source_url = db.Column(db.String(500), nullable=False)
+    resolution = db.Column(db.String(20), nullable=False, default='480p') # NEW
     start_time = db.Column(db.DateTime, nullable=True)
     end_time = db.Column(db.DateTime, nullable=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
@@ -82,104 +72,74 @@ class VideoSchema(ma.SQLAlchemyAutoSchema):
 class BroadcastSchema(ma.SQLAlchemyAutoSchema):
     class Meta: model = Broadcast; include_fk = True
 
-user_schema=UserSchema(); destination_schema=DestinationSchema(many=True); video_schema=VideoSchema(many=True); broadcasts_schema=BroadcastSchema(many=True); single_broadcast_schema = BroadcastSchema()
+user_schema=UserSchema(); destination_schema=DestinationSchema(many=True); video_schema=VideoSchema(many=True); broadcasts_schema=BroadcastSchema(many=True); single_broadcast_schema=BroadcastSchema()
 
 # --- Auth Endpoints ---
 @app.route('/api/auth/register', methods=['POST'])
 def register_user():
-    data = request.get_json()
-    full_name = data.get('full_name')
-    email = data.get('email')
-    password = data.get('password')
+    data = request.get_json(); full_name = data.get('full_name'); email = data.get('email'); password = data.get('password')
     if not all([full_name, email, password]): return jsonify({"error": "All fields are required"}), 400
     if User.query.filter_by(email=email).first(): return jsonify({"error": "Email already exists"}), 409
-    new_user = User(full_name=full_name, email=email, password=password)
-    db.session.add(new_user)
-    db.session.commit()
+    new_user = User(full_name=full_name, email=email, password=password); db.session.add(new_user); db.session.commit()
     return jsonify({"message": "User registered successfully"}), 201
 
 @app.route('/api/auth/login', methods=['POST'])
 def login_user():
-    data = request.get_json()
-    email = data.get('email')
-    password = data.get('password')
+    data = request.get_json(); email = data.get('email'); password = data.get('password')
     if not email or not password: return jsonify({"error": "Email and password required"}), 400
     user = User.query.filter_by(email=email).first()
     if user and user.password_hash and user.check_password(password):
-        access_token = create_access_token(identity=str(user.id))
-        return jsonify(access_token=access_token)
+        return jsonify(access_token=create_access_token(identity=str(user.id)))
     return jsonify({"error": "Invalid credentials"}), 401
     
 @app.route('/api/auth/google', methods=['POST'])
 def google_auth():
-    data = request.get_json()
-    token = data.get('token')
+    data = request.get_json(); token = data.get('token')
     try:
         id_info = id_token.verify_oauth2_token(token, google_requests.Request(), GOOGLE_CLIENT_ID)
-        email = id_info['email']
-        full_name = id_info['name']
+        email = id_info['email']; full_name = id_info['name']
         user = User.query.filter_by(email=email).first()
-        if not user:
-            user = User(email=email, full_name=full_name)
-            db.session.add(user)
-            db.session.commit()
-        access_token = create_access_token(identity=str(user.id))
-        return jsonify(access_token=access_token)
-    except ValueError as e:
-        return jsonify({"error": f"Token verification failed: {e}"}), 401
+        if not user: user = User(email=email, full_name=full_name); db.session.add(user); db.session.commit()
+        return jsonify(access_token=create_access_token(identity=str(user.id)))
+    except ValueError: return jsonify({"error": "Token verification failed"}), 401
 
 # --- User Profile Endpoint ---
 @app.route('/api/user/profile', methods=['GET'])
 @jwt_required()
-def get_user_profile():
-    user = User.query.get(get_jwt_identity())
-    return jsonify(user_schema.dump(user))
+def get_user_profile(): return jsonify(user_schema.dump(User.query.get(get_jwt_identity())))
 
 # --- Destination Endpoints ---
 @app.route('/api/destinations', methods=['GET'])
 @jwt_required()
-def get_destinations():
-    destinations = Destination.query.filter_by(user_id=get_jwt_identity()).all()
-    return jsonify(destination_schema.dump(destinations))
+def get_destinations(): return jsonify(destination_schema.dump(Destination.query.filter_by(user_id=get_jwt_identity()).all()))
 
 # --- Video Library Endpoints ---
 @app.route('/api/videos', methods=['GET'])
 @jwt_required()
-def get_videos():
-    videos = Video.query.filter_by(user_id=get_jwt_identity()).all()
-    return jsonify(video_schema.dump(videos))
+def get_videos(): return jsonify(video_schema.dump(Video.query.filter_by(user_id=get_jwt_identity()).all()))
 
 # --- Broadcast & Streaming Endpoints ---
 @app.route('/api/broadcasts', methods=['POST'])
 @jwt_required()
 def create_broadcast():
-    user_id = get_jwt_identity()
-    data = request.get_json()
-    title = data.get('title')
-    source_url = data.get('source_url')
-    destination_ids = data.get('destination_ids')
+    user_id = get_jwt_identity(); data = request.get_json()
+    title = data.get('title'); source_url = data.get('source_url'); destination_ids = data.get('destination_ids'); resolution = data.get('resolution', '480p')
     
-    if not all([title, source_url, destination_ids]):
-        return jsonify({"error": "Missing required fields"}), 400
+    if not all([title, source_url, destination_ids]): return jsonify({"error": "Missing required fields"}), 400
     
     destinations = Destination.query.filter(Destination.id.in_(destination_ids), Destination.user_id == user_id).all()
-    if len(destinations) != len(destination_ids):
-        return jsonify({"error": "One or more destination IDs are invalid."}), 400
+    if len(destinations) != len(destination_ids): return jsonify({"error": "Invalid destination IDs"}), 400
     
     dest_names = ", ".join([f"{d.platform}: {d.name}" for d in destinations])
-    broadcast = Broadcast(user_id=user_id, source_url=source_url, title=title, destinations_used=dest_names)
-    db.session.add(broadcast)
-    db.session.commit()
+    broadcast = Broadcast(user_id=user_id, source_url=source_url, title=title, destinations_used=dest_names, resolution=resolution)
+    db.session.add(broadcast); db.session.commit()
     return jsonify(single_broadcast_schema.dump(broadcast)), 201
 
 @app.route('/api/broadcasts', methods=['GET'])
 @jwt_required()
 def get_broadcasts():
     thirty_days_ago = datetime.utcnow() - timedelta(days=30)
-    broadcasts = Broadcast.query.filter(
-        Broadcast.user_id == get_jwt_identity(),
-        (Broadcast.start_time > thirty_days_ago) | (Broadcast.status == 'live') | (Broadcast.status == 'pending')
-    ).order_by(Broadcast.start_time.desc()).all()
+    broadcasts = Broadcast.query.filter(Broadcast.user_id == get_jwt_identity(),(Broadcast.start_time > thirty_days_ago) | (Broadcast.status == 'live') | (Broadcast.status == 'pending')).order_by(Broadcast.start_time.desc()).all()
     return jsonify(broadcasts_schema.dump(broadcasts))
 
 @app.route('/api/broadcasts/<int:broadcast_id>/start', methods=['POST'])
@@ -187,49 +147,44 @@ def get_broadcasts():
 def start_stream(broadcast_id):
     user_id = get_jwt_identity()
     broadcast = Broadcast.query.filter_by(id=broadcast_id, user_id=user_id).first()
-    if not broadcast or broadcast.status != 'pending':
-        return jsonify({"error": "Broadcast not found or not in pending state"}), 404
-    if broadcast_id in stream_processes and stream_processes[broadcast_id].poll() is None:
-        return jsonify({"error": "Stream is already running"}), 400
+    if not broadcast or broadcast.status != 'pending': return jsonify({"error": "Broadcast not found or not pending"}), 404
+    if broadcast_id in stream_processes and stream_processes[broadcast_id].poll() is None: return jsonify({"error": "Stream already running"}), 400
     
     dest_names_and_platforms = [(item.strip().split(': ')[1], item.strip().split(': ')[0]) for item in broadcast.destinations_used.split(',')]
     dest_names = [item[0] for item in dest_names_and_platforms]
     destinations = Destination.query.filter(Destination.name.in_(dest_names), Destination.user_id == user_id).all()
     
-    video_url = broadcast.source_url
-    audio_url = None
+    video_url = broadcast.source_url; audio_url = None
     if "youtube.com" in video_url or "youtu.be" in video_url:
         try:
             yt_dlp_cmd = ['yt-dlp', '-f', 'bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4][height<=720]/best', '-g', video_url]
             result = subprocess.run(yt_dlp_cmd, capture_output=True, text=True, check=True)
-            urls = result.stdout.strip().split('\n')
-            video_url = urls[0]
+            urls = result.stdout.strip().split('\n'); video_url = urls[0]
             if len(urls) > 1: audio_url = urls[1]
-        except Exception as e:
-            return jsonify({"error": f"yt-dlp failed: {e}"}), 500
+        except Exception as e: return jsonify({"error": f"yt-dlp failed: {e}"}), 500
+
+    resolution_settings = {
+        '480p': {'scale': '854:480', 'bitrate': '900k', 'bufsize': '1800k'},
+        '720p': {'scale': '1280:720', 'bitrate': '1800k', 'bufsize': '3600k'}
+    }
+    settings = resolution_settings.get(broadcast.resolution, resolution_settings['480p'])
 
     rtmp_bases = {'youtube': 'rtmp://a.rtmp.youtube.com/live2/', 'facebook': 'rtmps://live-api-s.facebook.com:443/rtmp/'}
-    command = ['ffmpeg', '-re']
-    command.extend(['-i', video_url])
+    command = ['ffmpeg', '-re']; command.extend(['-i', video_url]);
     if audio_url: command.extend(['-i', audio_url])
-    command.extend(['-c:v', 'libx264', '-preset', 'veryfast', '-vf', 'scale=854:480', '-b:v', '900k', '-maxrate', '900k', '-bufsize', '1800k', '-pix_fmt', 'yuv420p', '-g', '50'])
+    command.extend(['-c:v', 'libx264', '-preset', 'veryfast', '-vf', f"scale={settings['scale']}", '-b:v', settings['bitrate'], '-maxrate', settings['bitrate'], '-bufsize', settings['bufsize'], '-pix_fmt', 'yuv420p', '-g', '50'])
     if audio_url: command.extend(['-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-map', '0:v:0', '-map', '1:a:0'])
     else: command.extend(['-c:a', 'aac', '-b:a', '128k', '-ar', '44100'])
     
     for dest in destinations:
         platform_lower = dest.platform.lower()
-        if platform_lower in rtmp_bases:
-            command.extend(['-f', 'flv', rtmp_bases[platform_lower] + dest.stream_key])
+        if platform_lower in rtmp_bases: command.extend(['-f', 'flv', rtmp_bases[platform_lower] + dest.stream_key])
 
     try:
-        process = subprocess.Popen(command)
-        stream_processes[broadcast_id] = process
-        broadcast.status = 'live'
-        broadcast.start_time = datetime.utcnow()
-        db.session.commit()
+        process = subprocess.Popen(command); stream_processes[broadcast_id] = process
+        broadcast.status = 'live'; broadcast.start_time = datetime.utcnow(); db.session.commit()
         return jsonify({"message": "Stream started"})
-    except Exception as e:
-        return jsonify({"error": f"FFmpeg failed: {e}"}), 500
+    except Exception as e: return jsonify({"error": f"FFmpeg failed: {e}"}), 500
 
 @app.route('/api/broadcasts/<int:broadcast_id>/stop', methods=['POST'])
 @jwt_required()
@@ -237,24 +192,14 @@ def stop_stream(broadcast_id):
     broadcast = Broadcast.query.filter_by(id=broadcast_id, user_id=get_jwt_identity()).first()
     if not broadcast: return jsonify({"error": "Broadcast not found"}), 404
     process = stream_processes.get(broadcast_id)
-    if process and process.poll() is None:
-        process.terminate()
-        process.wait()
-    broadcast.status = 'finished'
-    broadcast.end_time = datetime.utcnow()
+    if process and process.poll() is None: process.terminate(); process.wait()
+    broadcast.status = 'finished'; broadcast.end_time = datetime.utcnow()
     db.session.commit()
-    if broadcast_id in stream_processes:
-        del stream_processes[broadcast_id]
+    if broadcast_id in stream_processes: del stream_processes[broadcast_id]
     return jsonify({"message": "Stream stopped"})
 
-# --- Health Check ---
+# --- Health Check & DB Creation ---
 @app.route('/')
-def status():
-    return jsonify({"status": "API is online"})
-
-# --- Create DB ---
-with app.app_context():
-    db.create_all()
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8000)
+def status(): return jsonify({"status": "API is online"})
+with app.app_context(): db.create_all()
+if __name__ == '__main__': app.run(host='0.0.0.0', port=8000)
