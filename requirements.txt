@@ -10,3 +10,5 @@ Flask-Bcrypt
 Flask-JWT-Extended
 google-auth
 requests
+google-api-python-client
+google-auth-oauthlib
