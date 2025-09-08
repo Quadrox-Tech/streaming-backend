@@ -82,6 +82,7 @@ class Broadcast(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     destinations_used = db.Column(db.Text, nullable=True)
     destination_ids_used = db.Column(db.Text, nullable=True)
+    ### FINAL FIX PART 1 ###: Added column to store the YouTube Broadcast ID
     youtube_broadcast_id = db.Column(db.String(100), nullable=True)
 
 # --- API Schemas ---
@@ -243,7 +244,7 @@ def create_broadcast():
 
     if not dest_names: return jsonify({"error": "Invalid destination IDs"}), 400
     
-    broadcast = Broadcast(user_id=user_id, source_url=source_url, title=title, destinations_used=", ".join(dest_names), destination_ids_used=json.dumps(destination_ids))
+    broadcast = Broadcast(user_id=user_id, source_url=source_url, title=title, destinations_used=", ".join(dest_names), destination_ids_used=json.dumps(destination_ids), resolution=resolution)
     db.session.add(broadcast); db.session.commit()
     return jsonify(single_broadcast_schema.dump(broadcast)), 201
 
@@ -254,12 +255,13 @@ def get_broadcasts():
     broadcasts = Broadcast.query.filter(Broadcast.user_id == get_jwt_identity(),(Broadcast.start_time > thirty_days_ago) | (Broadcast.status.in_(['live', 'pending']))).order_by(db.desc(Broadcast.id)).all()
     return jsonify(broadcasts_schema.dump(broadcasts))
 
+### FINAL FIX PART 2 ###: The entire _run_stream function is rewritten to use the correct API workflow.
 def _run_stream(app, broadcast_id):
     with app.app_context():
         broadcast = Broadcast.query.get(broadcast_id)
         process = None
         youtube_service = None
-        youtube_broadcast_id = None
+        youtube_broadcast_id_str = None
         try:
             rtmp_outputs = []
             destination_ids = json.loads(broadcast.destination_ids_used)
@@ -286,8 +288,8 @@ def _run_stream(app, broadcast_id):
                     stream_yt_id = stream_insert['id']
 
                     broadcast_insert = youtube_service.liveBroadcasts().insert(part="snippet,status,contentDetails", body={"snippet": {"title": broadcast.title, "scheduledStartTime": datetime.utcnow().isoformat() + "Z"}, "status": {"privacyStatus": "public"}, "contentDetails": {"streamId": stream_yt_id, "enableAutoStop": True}}).execute()
-                    youtube_broadcast_id = broadcast_insert['id']
-                    broadcast.youtube_broadcast_id = youtube_broadcast_id
+                    youtube_broadcast_id_str = broadcast_insert['id']
+                    broadcast.youtube_broadcast_id = youtube_broadcast_id_str
                     db.session.commit()
                     
                     ingestion_address = stream_insert['cdn']['ingestionInfo']['ingestionAddress']
@@ -320,19 +322,19 @@ def _run_stream(app, broadcast_id):
             process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             stream_processes[broadcast.id] = process
             
-            if youtube_service and youtube_broadcast_id:
-                # Poll for stream health
-                for _ in range(20): # Try for up to 100 seconds
+            if youtube_service and youtube_broadcast_id_str:
+                for _ in range(24): # Try for up to 2 minutes
                     time.sleep(5)
-                    broadcast_status = youtube_service.liveBroadcasts().list(part='snippet,status', id=youtube_broadcast_id).execute()
-                    health_status = broadcast_status['items'][0]['status']['healthStatus']['status']
-                    print(f"--- YouTube stream health check: {health_status} ---")
-                    if health_status == 'good':
-                        youtube_service.liveBroadcasts().transition(part='id,snippet,status', id=youtube_broadcast_id, broadcastStatus='live').execute()
-                        print(f"--- YouTube Broadcast {youtube_broadcast_id} transitioned to LIVE ---")
-                        break
+                    broadcast_status_res = youtube_service.liveBroadcasts().list(part='snippet,status', id=youtube_broadcast_id_str).execute()
+                    if broadcast_status_res['items']:
+                        life_cycle = broadcast_status_res['items'][0]['status']['lifeCycleStatus']
+                        print(f"--- [YT Health Check] Broadcast '{youtube_broadcast_id_str}' status is: {life_cycle} ---")
+                        if life_cycle == 'testing' or life_cycle == 'live':
+                            youtube_service.liveBroadcasts().transition(part='id', id=youtube_broadcast_id_str, broadcastStatus='live').execute()
+                            print(f"--- YouTube Broadcast {youtube_broadcast_id_str} transitioned to LIVE ---")
+                            break
                 else:
-                    print("--- YouTube stream never became healthy. ---")
+                    print("--- YouTube stream never became ready for transition. ---")
             
             for line in iter(process.stdout.readline, b''):
                 if not line: break
@@ -344,17 +346,14 @@ def _run_stream(app, broadcast_id):
             broadcast.status = 'failed'
         else:
             if process and process.returncode == 0:
-                print(f"--- Stream finished successfully (Broadcast ID: {broadcast.id}) ---")
                 broadcast.status = 'finished'
             else:
-                print(f"!!! STREAM FAILED (Broadcast ID: {broadcast.id}) !!! FFMPEG exited with code: {process.returncode if process else 'N/A'}")
                 broadcast.status = 'failed'
         finally:
             broadcast.end_time = datetime.utcnow()
-            if youtube_service and youtube_broadcast_id:
+            if youtube_service and youtube_broadcast_id_str:
                 try:
-                    youtube_service.liveBroadcasts().transition(part='id,snippet,status', id=youtube_broadcast_id, broadcastStatus='complete').execute()
-                    print(f"--- YouTube Broadcast {youtube_broadcast_id} transitioned to COMPLETE ---")
+                    youtube_service.liveBroadcasts().transition(part='id', id=youtube_broadcast_id_str, broadcastStatus='complete').execute()
                 except HttpError: pass
             if broadcast.id in stream_processes:
                 del stream_processes[broadcast.id]
