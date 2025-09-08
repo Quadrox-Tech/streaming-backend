@@ -250,23 +250,26 @@ def get_broadcasts():
     broadcasts = Broadcast.query.filter(Broadcast.user_id == get_jwt_identity(),(Broadcast.start_time > thirty_days_ago) | (Broadcast.status == 'live') | (Broadcast.status == 'pending')).order_by(db.desc(Broadcast.id)).all()
     return jsonify(broadcasts_schema.dump(broadcasts))
 
-### FIX ###: The entire start_stream function is in "Loud Debug Mode".
-@app.route('/api/broadcasts/<int_broadcast_id>/start', methods=['POST'])
+### FINAL FIX ### The route variable name now matches the function argument name.
+@app.route('/api/broadcasts/<int:broadcast_id>/start', methods=['POST'])
 @jwt_required()
 def start_stream(broadcast_id):
     user_id = get_jwt_identity()
     broadcast = Broadcast.query.get(broadcast_id)
-    print(f"--- LOUD DEBUG: Received start request for broadcast ID: {broadcast_id} ---")
     if not broadcast or str(broadcast.user_id) != user_id or broadcast.status != 'pending':
         return jsonify({"error": "Broadcast not found or not pending"}), 404
     
-    # ### THIS IS A DEBUGGING VERSION - IT WILL CRASH ON PURPOSE TO SHOW THE FULL ERROR ###
     try:
         rtmp_outputs = []
         destination_ids = json.loads(broadcast.destination_ids_used)
 
         for dest_id_str in destination_ids:
-            if dest_id_str.startswith('youtube-'):
+            if dest_id_str.startswith('manual-'):
+                db_id = int(dest_id_str.split('-')[1])
+                dest = Destination.query.get(db_id)
+                if dest: rtmp_outputs.append(dest.stream_key)
+
+            elif dest_id_str.startswith('youtube-'):
                 db_id = int(dest_id_str.split('-')[1])
                 account = ConnectedAccount.query.get(db_id)
                 if not account: continue
@@ -275,7 +278,8 @@ def start_stream(broadcast_id):
                 youtube = build('youtube', 'v3', credentials=creds)
 
                 stream_format = broadcast.resolution
-                print(f"--- LOUD DEBUG: Attempting to create stream with resolution: '{stream_format}' ---")
+                if not stream_format or stream_format not in ['1080p', '1440p', '2160p', '720p', '480p', '360p', '240p']:
+                    stream_format = '480p'
                 
                 stream_insert = youtube.liveStreams().insert(part="snippet,cdn,status", body={"snippet": {"title": broadcast.title}, "cdn": {"format": stream_format, "ingestionType": "rtmp"}}).execute()
                 stream_yt_id = stream_insert['id']
@@ -286,14 +290,42 @@ def start_stream(broadcast_id):
                 stream_name = stream_insert['cdn']['ingestionInfo']['streamName']
                 rtmp_outputs.append(f"{ingestion_address}/{stream_name}")
 
-        # This part of the code will not be reached if the API call fails.
-        return jsonify({"message": "This should not be returned in debug mode if there is an error."})
+        if not rtmp_outputs: return jsonify({"error": "No valid stream destinations found."}), 400
 
+        video_url, audio_url = (broadcast.source_url, None)
+        if "youtube.com" in video_url or "youtu.be" in video_url:
+            yt_dlp_cmd = ['yt-dlp', '-f', 'bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]/best', '-g', video_url]
+            result = subprocess.run(yt_dlp_cmd, capture_output=True, text=True, check=True)
+            urls = result.stdout.strip().split('\n')
+            video_url = urls[0]
+            if len(urls) > 1: audio_url = urls[1]
+
+        settings = {'scale': '854:480', 'bitrate': '900k', 'bufsize': '1800k'}
+        if broadcast.resolution == '720p': settings = {'scale': '1280:720', 'bitrate': '1800k', 'bufsize': '3600k'}
+
+        command = ['ffmpeg', '-re', '-i', video_url]
+        if audio_url: command.extend(['-i', audio_url])
+        command.extend(['-c:v', 'libx264', '-preset', 'veryfast', '-vf', f"scale={settings['scale']}", '-b:v', settings['bitrate'], '-maxrate', settings['bitrate'], '-bufsize', settings['bufsize'], '-pix_fmt', 'yuv420p', '-g', '50', '-c:a', 'aac', '-b:a', '128k', '-ar', '44100'])
+        if audio_url: command.extend(['-map', '0:v:0', '-map', '1:a:0'])
+        
+        for rtmp_url in rtmp_outputs:
+            command.extend(['-f', 'flv', rtmp_url])
+        
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stream_processes[broadcast_id] = process
+        
+        broadcast.status = 'live'; broadcast.start_time = datetime.utcnow(); db.session.commit()
+        return jsonify({"message": "Stream started"})
+
+    except subprocess.CalledProcessError as e:
+        broadcast.status = 'failed'; db.session.commit()
+        return jsonify({"error": "Failed to get video source URL.", "details": e.stderr}), 500
     except HttpError as e:
-        print("!!!!!! LOUD DEBUG: YouTube API HttpError was caught. Crashing intentionally. !!!!!!")
-        print("!!!!!! The full error from Google is below: !!!!!!")
-        print(e.content) # Print the detailed JSON error from Google
-        raise e # Force the crash to get the full traceback in the logs
+        broadcast.status = 'failed'; db.session.commit()
+        return jsonify({"error": f"An error occurred with the YouTube API: {e.reason}"}), 500
+    except Exception as e:
+        broadcast.status = 'failed'; db.session.commit()
+        return jsonify({"error": "An unexpected error occurred."}), 500
 
 @app.route('/api/broadcasts/<int:broadcast_id>/stop', methods=['POST'])
 @jwt_required()
@@ -319,3 +351,5 @@ with app.app_context():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000)
+
+
