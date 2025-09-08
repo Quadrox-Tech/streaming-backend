@@ -213,7 +213,6 @@ def get_all_possible_destinations():
         try:
             creds = Credentials(None, refresh_token=account.refresh_token, token_uri='https://oauth2.googleapis.com/token', client_id=GOOGLE_CLIENT_ID, client_secret=GOOGLE_CLIENT_SECRET)
             youtube = build('youtube', 'v3', credentials=creds)
-            # A better eligibility check is to see if the channel itself has live streaming enabled.
             channel_response = youtube.channels().list(part='status', mine=True).execute()
             if channel_response.get('items') and channel_response['items'][0]['status'].get('longUploadsStatus') == 'allowed':
                  dest_info.update({"eligible": True, "reason": ""})
@@ -267,12 +266,12 @@ def _wait_for_stream_active(youtube_service, stream_id, timeout=120):
                 id=stream_id
             ).execute()
 
-            if response['items']:
+            if response.get('items'):
                 stream_status = response['items'][0]['status']['streamStatus']
                 print(f"[YouTube Check] Stream '{stream_id}' status is: {stream_status}")
                 if stream_status == 'active':
                     return True
-            time.sleep(5)  # Wait 5 seconds between checks
+            time.sleep(5)
         except HttpError as e:
             print(f"Error checking stream status: {e}")
             time.sleep(5)
@@ -348,8 +347,15 @@ def _run_stream(app, broadcast_id):
             
             if youtube_service and youtube_broadcast_id and stream_yt_id:
                 if _wait_for_stream_active(youtube_service, stream_yt_id):
-                    print("--- YouTube stream is active. Transitioning broadcast to LIVE. ---")
-                    youtube_service.liveBroadcasts().transition(part='id,snippet,status', id=youtube_broadcast_id, broadcastStatus='live').execute()
+                    print("--- Stream is active. Waiting 7 seconds for stability before transitioning... ---")
+                    time.sleep(7)
+                    
+                    print("--- Transitioning broadcast to LIVE. ---")
+                    youtube_service.liveBroadcasts().transition(
+                        part='id,snippet,status', 
+                        id=youtube_broadcast_id, 
+                        broadcastStatus='live'
+                    ).execute()
                 else:
                     raise Exception("Stream did not become active on YouTube within the timeout period.")
 
@@ -362,17 +368,16 @@ def _run_stream(app, broadcast_id):
             print(f"!!! STREAM FAILED (Broadcast ID: {broadcast.id}) !!! ERROR: {e}")
             broadcast.status = 'failed'
         else:
-            if process.returncode == 0:
+            if process and process.returncode == 0:
                 print(f"--- Stream finished successfully (Broadcast ID: {broadcast.id}) ---")
                 broadcast.status = 'finished'
             else:
-                print(f"!!! STREAM FAILED (Broadcast ID: {broadcast.id}) !!! FFMPEG exited with code: {process.returncode}")
+                print(f"!!! STREAM FAILED (Broadcast ID: {broadcast.id}) !!! FFMPEG exited with code: {process.returncode if process else 'N/A'}")
                 broadcast.status = 'failed'
         finally:
             broadcast.end_time = datetime.utcnow()
             if youtube_service and youtube_broadcast_id:
                 try:
-                    # enableAutoStop should handle this, but you could add a manual transition to 'complete' if needed
                     print(f"--- Broadcast {youtube_broadcast_id} is ending. ---")
                 except HttpError as e: 
                     print(f"Could not transition broadcast to complete: {e}")
