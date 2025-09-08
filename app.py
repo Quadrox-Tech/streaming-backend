@@ -236,7 +236,6 @@ def handle_broadcasts():
         db.session.add(broadcast); db.session.commit()
         return jsonify(single_broadcast_schema.dump(broadcast)), 201
     
-    # GET request
     thirty_days_ago = datetime.utcnow() - timedelta(days=30)
     broadcasts = Broadcast.query.filter(Broadcast.user_id == user_id, (Broadcast.start_time > thirty_days_ago) | (Broadcast.status.in_(['live', 'pending', 'finished', 'failed']))).order_by(db.desc(Broadcast.id)).all()
     return jsonify(broadcasts_schema.dump(broadcasts))
@@ -293,7 +292,6 @@ def _run_stream(app, broadcast_id):
 
             video_url, audio_url = (broadcast.source_url, None)
             if "youtube.com" in video_url or "youtu.be" in video_url:
-                # *** FINAL, SIMPLE, AND CORRECT LOGIC ***
                 yt_dlp_cmd = ['yt-dlp', '-f', 'bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]/best', '-g', '--cookies', '/app/cookies.txt', video_url]
                 try:
                     print(f"--- [Broadcast {broadcast.id}] Attempting yt-dlp with cookies file... ---")
