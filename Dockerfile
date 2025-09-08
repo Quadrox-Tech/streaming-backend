@@ -17,6 +17,8 @@ COPY cookies.txt /app/cookies.txt
 COPY . .
 
 EXPOSE 8000
-CMD ["gunicorn", "--bind", "0.toString()0.0:8000", "app:app"]
+
+# *** THE TYPO IS FIXED HERE ***
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:app"]
 
 
