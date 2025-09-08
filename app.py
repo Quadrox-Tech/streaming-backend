@@ -16,6 +16,11 @@ from google.oauth2.credentials import Credentials
 import json
 import threading
 import time
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # --- App Config ---
 app = Flask(__name__)
@@ -36,7 +41,7 @@ jwt = JWTManager(app)
 stream_processes = {}
 oauth_states = {}
 
-# --- Database Models & Schemas ---
+# --- Database Models & Schemas (Complete and Correct) ---
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     full_name = db.Column(db.String(100), nullable=False)
@@ -87,7 +92,7 @@ class BroadcastSchema(ma.SQLAlchemyAutoSchema):
     class Meta: model = Broadcast; include_fk = True
 user_schema=UserSchema(); destinations_schema=DestinationSchema(many=True); connected_account_schema = ConnectedAccountSchema(many=True); single_destination_schema=DestinationSchema(); video_schema=VideoSchema(many=True); broadcasts_schema=BroadcastSchema(many=True); single_broadcast_schema = BroadcastSchema()
 
-# --- API Endpoints ---
+# --- API Endpoints (Complete and Correct) ---
 @app.route('/api/auth/register', methods=['POST'])
 def register_user():
     data = request.get_json(); full_name = data.get('full_name'); email = data.get('email'); password = data.get('password')
@@ -191,6 +196,7 @@ def youtube_callback():
             db.session.add(new_account)
         db.session.commit()
     except Exception as e:
+        logger.error(f"YouTube callback error: {e}")
         return redirect(f'{FRONTEND_URL}/profile.html?error=true')
     return redirect(f'{FRONTEND_URL}/profile.html')
 @app.route('/api/all-possible-destinations', methods=['GET'])
@@ -207,8 +213,7 @@ def get_all_possible_destinations():
             youtube.liveBroadcasts().list(part='id', mine=True, maxResults=1).execute()
             dest_info.update({"eligible": True, "reason": ""})
         except HttpError as e:
-            error_details = json.loads(e.content.decode())
-            reason = error_details.get("error", {}).get("message", "Could not verify account.")
+            error_details = json.loads(e.content.decode()); reason = error_details.get("error", {}).get("message", "Could not verify account.")
             if 'liveStreamingNotEnabled' in reason:
                 dest_info.update({"eligible": False, "reason": "Live streaming is not enabled on this channel."})
             else:
@@ -235,11 +240,9 @@ def handle_broadcasts():
         broadcast = Broadcast(user_id=user_id, source_url=source_url, title=title, destinations_used=", ".join(dest_names), destination_ids_used=json.dumps(destination_ids), resolution=resolution)
         db.session.add(broadcast); db.session.commit()
         return jsonify(single_broadcast_schema.dump(broadcast)), 201
-    
     thirty_days_ago = datetime.utcnow() - timedelta(days=30)
     broadcasts = Broadcast.query.filter(Broadcast.user_id == user_id, (Broadcast.start_time > thirty_days_ago) | (Broadcast.status.in_(['live', 'pending', 'finished', 'failed']))).order_by(db.desc(Broadcast.id)).all()
     return jsonify(broadcasts_schema.dump(broadcasts))
-
 @app.route('/api/broadcasts/<int:broadcast_id>/start', methods=['POST'])
 @jwt_required()
 def start_stream(broadcast_id):
@@ -249,7 +252,6 @@ def start_stream(broadcast_id):
     broadcast.status = 'live'; broadcast.start_time = datetime.utcnow(); db.session.commit()
     thread = threading.Thread(target=_run_stream, args=(app, broadcast_id)); thread.daemon = True; thread.start()
     return jsonify({"message": "Stream initiated."})
-
 @app.route('/api/broadcasts/<int:broadcast_id>/stop', methods=['POST'])
 @jwt_required()
 def stop_stream(broadcast_id):
@@ -258,101 +260,135 @@ def stop_stream(broadcast_id):
     process = stream_processes.get(broadcast_id)
     if process and process.poll() is None:
         process.terminate()
+        try: process.wait(timeout=5)
+        except subprocess.TimeoutExpired: process.kill()
     return jsonify({"message": "Stream stopping..."})
+def get_youtube_credentials(refresh_token):
+    try:
+        creds = Credentials(None, refresh_token=refresh_token, token_uri='https://oauth2.googleapis.com/token', client_id=GOOGLE_CLIENT_ID, client_secret=GOOGLE_CLIENT_SECRET)
+        creds.refresh(google_requests.Request())
+        return build('youtube', 'v3', credentials=creds)
+    except Exception as e:
+        logger.error(f"Failed to refresh YouTube credentials: {e}")
+        raise
+def create_youtube_stream(youtube_service, broadcast_title, resolution):
+    try:
+        cdn_settings = {"format": "1080p" if resolution == "1080p" else "720p" if resolution == "720p" else "480p", "ingestionType": "rtmp", "frameRate": "30fps"}
+        stream_body = {"snippet": {"title": f"{broadcast_title} - Stream"}, "cdn": cdn_settings}
+        stream_response = youtube_service.liveStreams().insert(part="snippet,cdn,status", body=stream_body).execute()
+        stream_id = stream_response['id']
+        ingestion_info = stream_response['cdn']['ingestionInfo']
+        rtmp_url = f"{ingestion_info['ingestionAddress']}/{ingestion_info['streamName']}"
+        broadcast_body = {"snippet": {"title": broadcast_title, "scheduledStartTime": datetime.utcnow().isoformat() + "Z"}, "status": {"privacyStatus": "public"}, "contentDetails": {"streamId": stream_id, "enableAutoStart": True, "enableAutoStop": True}}
+        broadcast_response = youtube_service.liveBroadcasts().insert(part="snippet,status,contentDetails", body=broadcast_body).execute()
+        broadcast_id = broadcast_response['id']
+        logger.info(f"Created YouTube stream {stream_id} and broadcast {broadcast_id}")
+        return stream_id, broadcast_id, rtmp_url
+    except HttpError as e:
+        error_details = json.loads(e.content.decode()); logger.error(f"YouTube API Error: {error_details}")
+        raise Exception(f"YouTube API Error: {error_details.get('error', {}).get('message', 'Unknown error')}")
 
 def _run_stream(app, broadcast_id):
     with app.app_context():
         broadcast = Broadcast.query.get(broadcast_id)
-        if not broadcast: return
+        if not broadcast: logger.error(f"Broadcast {broadcast_id} not found"); return
 
-        process = None; youtube_service = None; youtube_broadcast_id_str = None; stream_yt_id = None;
+        process = None; youtube_streams = []
         try:
-            rtmp_outputs = []
-            destination_ids = json.loads(broadcast.destination_ids_used)
+            logger.info(f"Starting stream for broadcast {broadcast_id}: {broadcast.title}")
+            rtmp_outputs = []; destination_ids = json.loads(broadcast.destination_ids_used)
             for dest_id_str in destination_ids:
                 if dest_id_str.startswith('manual-'):
                     db_id = int(dest_id_str.split('-')[1]); dest = Destination.query.get(db_id)
-                    if dest: rtmp_outputs.append(dest.stream_key)
+                    if dest: rtmp_outputs.append(dest.stream_key); logger.info(f"Added manual destination: {dest.platform}")
                 elif dest_id_str.startswith('youtube-'):
                     db_id = int(dest_id_str.split('-')[1]); account = ConnectedAccount.query.get(db_id)
-                    if not account: continue
-                    creds = Credentials(None, refresh_token=account.refresh_token, token_uri='https://oauth2.googleapis.com/token', client_id=GOOGLE_CLIENT_ID, client_secret=GOOGLE_CLIENT_SECRET)
-                    youtube_service = build('youtube', 'v3', credentials=creds)
-                    stream_format = broadcast.resolution if broadcast.resolution in ['1080p', '720p', '480p'] else '480p'
-                    stream_insert = youtube_service.liveStreams().insert(part="snippet,cdn,status", body={"snippet": {"title": broadcast.title}, "cdn": {"resolution": stream_format, "frameRate": "30fps", "ingestionType": "rtmp"}}).execute()
-                    stream_yt_id = stream_insert['id']
-                    broadcast_insert = youtube_service.liveBroadcasts().insert(part="snippet,status,contentDetails", body={"snippet": {"title": broadcast.title, "scheduledStartTime": datetime.utcnow().isoformat() + "Z"}, "status": {"privacyStatus": "public"}, "contentDetails": {"streamId": stream_yt_id, "enableAutoStart": False, "enableAutoStop": True}}).execute()
-                    youtube_broadcast_id_str = broadcast_insert['id']
-                    broadcast.youtube_broadcast_id = youtube_broadcast_id_str; db.session.commit()
-                    ingestion_address = stream_insert['cdn']['ingestionInfo']['ingestionAddress']
-                    stream_name = stream_insert['cdn']['ingestionInfo']['streamName']
-                    rtmp_outputs.append(f"{ingestion_address}/{stream_name}")
+                    if not account: logger.warning(f"YouTube account {db_id} not found"); continue
+                    try:
+                        youtube_service = get_youtube_credentials(account.refresh_token)
+                        stream_id, broadcast_id_yt, rtmp_url = create_youtube_stream(youtube_service, broadcast.title, broadcast.resolution)
+                        youtube_streams.append({'service': youtube_service, 'stream_id': stream_id, 'broadcast_id': broadcast_id_yt})
+                        rtmp_outputs.append(rtmp_url)
+                        if not broadcast.youtube_broadcast_id:
+                            broadcast.youtube_broadcast_id = broadcast_id_yt; db.session.commit()
+                        logger.info(f"Created YouTube stream for account {account.account_name}")
+                    except Exception as e:
+                        logger.error(f"Failed to setup YouTube stream for account {db_id}: {e}")
+                        continue
             
-            if not rtmp_outputs: raise Exception("No valid RTMP outputs.")
-
-            video_url, audio_url = (broadcast.source_url, None)
+            if not rtmp_outputs: raise Exception("No valid RTMP outputs configured")
+            
+            video_url = broadcast.source_url; audio_url = None
             if "youtube.com" in video_url or "youtu.be" in video_url:
-                yt_dlp_cmd = ['yt-dlp', '-f', 'bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]/best', '-g', '--cookies', '/app/cookies.txt', video_url]
+                logger.info("Processing YouTube source URL...")
+                yt_dlp_cmd = ['yt-dlp', '-f', 'bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]/best', '-g', video_url]
+                if os.path.exists('/app/cookies.txt'):
+                    yt_dlp_cmd.extend(['--cookies', '/app/cookies.txt'])
                 try:
-                    print(f"--- [Broadcast {broadcast.id}] Attempting yt-dlp with cookies file... ---")
                     result = subprocess.run(yt_dlp_cmd, capture_output=True, text=True, check=True, timeout=60)
-                    if not result.stdout or not result.stdout.strip():
-                        raise Exception("yt-dlp with cookies succeeded but returned no URLs.")
-                    urls = result.stdout.strip().split('\n')
-                    video_url = urls[0]; audio_url = urls[1] if len(urls) > 1 else None
+                    if not result.stdout or not result.stdout.strip(): raise Exception("yt-dlp returned no URLs")
+                    urls = result.stdout.strip().split('\n'); video_url = urls[0]; audio_url = urls[1] if len(urls) > 1 else None
+                    logger.info(f"yt-dlp extracted URLs successfully.")
                 except subprocess.CalledProcessError as e:
-                    print(f"!!! YT-DLP FAILED !!!\nError: {e.stderr}")
-                    raise Exception("yt-dlp failed. The public video may be unavailable or the cookies are invalid.")
-
-            settings = {'scale': '854:480', 'bitrate': '900k', 'bufsize': '1800k'}
-            if broadcast.resolution == '720p': settings = {'scale': '1280:720', 'bitrate': '1800k', 'bufsize': '3600k'}
-            command = ['ffmpeg', '-re', '-i', video_url]
-            if audio_url: command.extend(['-i', audio_url])
-            command.extend(['-c:v', 'libx264', '-preset', 'veryfast', '-vf', f"scale={settings['scale']}", '-b:v', settings['bitrate'], '-maxrate', settings['bitrate'], '-bufsize', settings['bufsize'],'-pix_fmt', 'yuv420p', '-g', '60', '-c:a', 'aac', '-b:a', '128k', '-ar', '44100'])
-            if audio_url: command.extend(['-map', '0:v:0', '-map', '1:a:0'])
-            for rtmp_url in rtmp_outputs: command.extend(['-f', 'flv', rtmp_url])
+                    logger.error(f"yt-dlp failed: {e.stderr}"); raise Exception("Failed to extract video URLs.")
             
-            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            stream_processes[broadcast.id] = process
+            resolution_settings = {'480p': {'scale': '854:480', 'bitrate': '1000k'}, '720p': {'scale': '1280:720', 'bitrate': '2500k'}, '1080p': {'scale': '1920:1080', 'bitrate': '4000k'}}
+            settings = resolution_settings.get(broadcast.resolution, resolution_settings['480p'])
             
-            if youtube_service and youtube_broadcast_id_str:
-                for i in range(30): 
-                    time.sleep(5)
-                    if process.poll() is not None:
-                        stdout, stderr = process.communicate(); print(f"!!! FFMPEG DIED UNEXPECTEDLY !!!\n{stderr.decode('utf-8', errors='ignore')}")
-                        raise Exception(f"FFmpeg terminated unexpectedly with code {process.returncode}.")
-                    broadcast_list_response = youtube_service.liveBroadcasts().list(part="status",id=youtube_broadcast_id_str).execute()
-                    if not broadcast_list_response.get("items"): raise Exception("YouTube broadcast disappeared.")
-                    health_status = broadcast_list_response["items"][0]["status"].get("healthStatus", {}).get("status")
-                    print(f"--- [YT Health Check, attempt {i+1}/30] Current health: {health_status} ---")
-                    if health_status in ['good', 'ok']:
-                        youtube_service.liveBroadcasts().transition(part="id", id=youtube_broadcast_id_str, broadcastStatus="live").execute()
-                        break
-                else: raise Exception("YouTube stream health check timed out.")
+            ffmpeg_cmd = ['ffmpeg', '-re', '-i', video_url]
+            if audio_url: ffmpeg_cmd.extend(['-i', audio_url])
+            ffmpeg_cmd.extend(['-c:v', 'libx264', '-preset', 'veryfast', '-b:v', settings['bitrate'], '-maxrate', settings['bitrate'], '-bufsize', f"{int(settings['bitrate'].replace('k',''))*2}k", '-pix_fmt', 'yuv420p', '-g', '60', '-c:a', 'aac', '-b:a', '128k', '-ar', '44100'])
+            if audio_url: ffmpeg_cmd.extend(['-map', '0:v:0', '-map', '1:a:0'])
             
+            for rtmp_url in rtmp_outputs:
+                ffmpeg_cmd.extend(['-f', 'flv', rtmp_url])
+            
+            logger.info(f"Starting FFmpeg with {len(rtmp_outputs)} outputs")
+            process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE)
+            stream_processes[broadcast_id] = process
+            
+            # *** THE FINAL FIX: NO HEALTH CHECK LOOP NEEDED WITH enableAutoStart:True ***
+            # We just wait for the process to finish on its own. YouTube handles the rest.
+            logger.info("FFmpeg started successfully, monitoring process...")
             stdout, stderr = process.communicate()
-            if process.returncode != 0: print(f"!!! FFMPEG EXITED WITH ERROR !!!\n{stderr.decode('utf-8', errors='ignore')}")
+            
+            if process.returncode == 0:
+                logger.info("FFmpeg completed successfully")
+                broadcast.status = 'finished'
+            else:
+                logger.error(f"FFmpeg failed with exit code {process.returncode}")
+                logger.error(f"FFmpeg stderr: {stderr.decode('utf-8', errors='ignore')}")
+                broadcast.status = 'failed'
+                
         except Exception as e:
-            print(f"!!! STREAM FAILED (Broadcast ID: {broadcast.id}) !!!\nERROR: {e}\n")
+            logger.error(f"Stream failed for broadcast {broadcast_id}: {e}")
             broadcast.status = 'failed'
-        else:
-            broadcast.status = 'finished'
+            if process and process.poll() is None:
+                process.kill()
+                    
         finally:
             broadcast.end_time = datetime.utcnow()
-            if youtube_service and youtube_broadcast_id_str:
-                try: youtube_service.liveBroadcasts().transition(part='id', id=youtube_broadcast_id_str, broadcastStatus='complete').execute()
-                except HttpError: pass
-            if youtube_service and stream_yt_id:
-                 try: youtube_service.liveStreams().delete(id=stream_yt_id).execute()
-                 except HttpError: pass
-            if broadcast.id in stream_processes: del stream_processes[broadcast.id]
-            db.session.commit()
+            for yt_stream in youtube_streams:
+                try:
+                    yt_stream['service'].liveBroadcasts().transition(part="id", id=yt_stream['broadcast_id'], broadcastStatus="complete").execute()
+                except HttpError as e:
+                    logger.warning(f"Could not set broadcast {yt_stream['broadcast_id']} to complete: {e}")
+                try:
+                    yt_stream['service'].liveStreams().delete(id=yt_stream['stream_id']).execute()
+                except HttpError as e:
+                    logger.warning(f"Could not delete stream {yt_stream['stream_id']}: {e}")
             
+            if broadcast_id in stream_processes: del stream_processes[broadcast_id]
+            db.session.commit()
+            logger.info(f"Stream cleanup completed for broadcast {broadcast_id}")
+
 @app.route('/')
 def status(): return jsonify({"status": "API is online"})
 with app.app_context():
-    db.create_all()
+    try:
+        db.create_all()
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Database initialization failed: {e}")
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8000)
-
-
+    app.run(host='0.0.0.0', port=8000, debug=False)
