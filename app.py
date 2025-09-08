@@ -118,73 +118,7 @@ video_schema = VideoSchema(many=True)
 broadcasts_schema = BroadcastSchema(many=True)
 single_broadcast_schema = BroadcastSchema()
 
-# --- Auth Endpoints ---
-@app.route('/api/auth/register', methods=['POST'])
-def register_user():
-    data = request.get_json()
-    full_name = data.get('full_name')
-    email = data.get('email')
-    password = data.get('password')
-    if not all([full_name, email, password]):
-        return jsonify({"error": "All fields are required"}), 400
-    if User.query.filter_by(email=email).first():
-        return jsonify({"error": "Email already exists"}), 409
-    password_hash = bcrypt.generate_password_hash(password).decode('utf-8')
-    new_user = User(full_name=full_name, email=email, password_hash=password_hash)
-    db.session.add(new_user)
-    db.session.commit()
-    return jsonify({"message": "User registered successfully"}), 201
-
-@app.route('/api/auth/login', methods=['POST'])
-def login_user():
-    data = request.get_json()
-    email = data.get('email')
-    password = data.get('password')
-    if not email or not password:
-        return jsonify({"error": "Email and password required"}), 400
-    user = User.query.filter_by(email=email).first()
-    if user and user.password_hash and bcrypt.check_password_hash(user.password_hash, password):
-        return jsonify(access_token=create_access_token(identity=str(user.id)))
-    return jsonify({"error": "Invalid credentials"}), 401
-
-@app.route('/api/auth/google', methods=['POST'])
-def google_auth():
-    data = request.get_json()
-    token = data.get('token')
-    try:
-        id_info = id_token.verify_oauth2_token(token, google_requests.Request(), GOOGLE_CLIENT_ID)
-        email = id_info['email']
-        full_name = id_info['name']
-        user = User.query.filter_by(email=email).first()
-        if not user:
-            user = User(email=email, full_name=full_name)
-            db.session.add(user)
-            db.session.commit()
-        return jsonify(access_token=create_access_token(identity=str(user.id)))
-    except ValueError:
-        return jsonify({"error": "Token verification failed"}), 401
-
-# --- User Profile & Connections ---
-@app.route('/api/user/profile', methods=['GET', 'PUT'])
-@jwt_required()
-def user_profile():
-    user_id = get_jwt_identity()
-    user = User.query.get(user_id)
-    if not user:
-        return jsonify({"error": "User not found"}), 404
-    if request.method == 'PUT':
-        data = request.get_json()
-        new_name = data.get('full_name')
-        if not new_name:
-            return jsonify({"error": "Full name is required"}), 400
-        user.full_name = new_name
-        db.session.commit()
-        return jsonify({"message": "Profile updated successfully"}), 200
-    return jsonify(user_schema.dump(user))
-
-# (keeping rest of CRUD endpoints same as your version...)
-
-# --- Streaming Logic Fix ---
+# --- Broadcast & Streaming ---
 def _run_stream(app, broadcast_id):
     with app.app_context():
         broadcast = Broadcast.query.get(broadcast_id)
@@ -218,23 +152,29 @@ def _run_stream(app, broadcast_id):
                     youtube_service = build('youtube', 'v3', credentials=creds)
 
                     stream_format = broadcast.resolution
-                    if not stream_format or stream_format not in ['1080p','1440p','2160p','720p','480p','360p','240p']:
+                    if stream_format not in ['1080p', '1440p', '2160p', '720p', '480p', '360p', '240p']:
                         stream_format = '480p'
 
                     stream_insert = youtube_service.liveStreams().insert(
                         part="snippet,cdn,status",
                         body={
                             "snippet": {"title": broadcast.title},
-                            "cdn": {"resolution": stream_format, "frameRate": "30fps", "ingestionType": "rtmp"}
+                            "cdn": {
+                                "resolution": stream_format,
+                                "frameRate": "30fps",
+                                "ingestionType": "rtmp"
+                            }
                         }
                     ).execute()
                     stream_yt_id = stream_insert['id']
 
-                    # 🔥 FIX: no scheduledStartTime → starts immediately
                     broadcast_insert = youtube_service.liveBroadcasts().insert(
                         part="snippet,status,contentDetails",
                         body={
-                            "snippet": {"title": broadcast.title},
+                            "snippet": {
+                                "title": broadcast.title,
+                                "scheduledStartTime": datetime.utcnow().isoformat() + "Z"
+                            },
                             "status": {"privacyStatus": "public"},
                             "contentDetails": {
                                 "streamId": stream_yt_id,
@@ -243,53 +183,61 @@ def _run_stream(app, broadcast_id):
                             }
                         }
                     ).execute()
-
                     youtube_broadcast_id = broadcast_insert['id']
                     broadcast.youtube_broadcast_id = youtube_broadcast_id
                     db.session.commit()
 
-                    ingestion = stream_insert['cdn']['ingestionInfo']
-                    rtmp_outputs.append(f"{ingestion['ingestionAddress']}/{ingestion['streamName']}")
+                    ingestion_address = stream_insert['cdn']['ingestionInfo']['ingestionAddress']
+                    stream_name = stream_insert['cdn']['ingestionInfo']['streamName']
+                    rtmp_outputs.append(f"{ingestion_address}/{stream_name}")
 
             if not rtmp_outputs:
                 broadcast.status = 'failed'
                 db.session.commit()
                 return
 
-            # FFmpeg handling (unchanged except cleaned settings)
             video_url, audio_url = (broadcast.source_url, None)
             if "youtube.com" in video_url or "youtu.be" in video_url:
-                yt_dlp_cmd = ['yt-dlp','-f','bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]/best','-g',video_url]
+                yt_dlp_cmd = [
+                    'yt-dlp',
+                    '-f',
+                    'bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                    '-g',
+                    video_url
+                ]
                 result = subprocess.run(yt_dlp_cmd, capture_output=True, text=True, check=True)
                 urls = result.stdout.strip().split('\n')
                 video_url = urls[0]
                 if len(urls) > 1:
                     audio_url = urls[1]
 
-            # ✅ FIXED settings dict (no unterminated string)
+            settings = {'scale': '854:480', 'bitrate': '900k', 'bufsize': '1800k'}
             if broadcast.resolution == '720p':
-                settings = {'scale':'1280:720','bitrate':'1800k','bufsize':'3600k'}
+                settings = {'scale': '1280:720', 'bitrate': '1800k', 'bufsize': '3600k'}
             elif broadcast.resolution == '1080p':
-                settings = {'scale':'1920:1080','bitrate':'3000k','bufsize':'6000k'}
-            else:
-                settings = {'scale':'854:480','bitrate':'900k','bufsize':'1800k'}
+                settings = {'scale': '1920:1080', 'bitrate': '3000k', 'bufsize': '6000k'}
 
-            command = ['ffmpeg','-re','-i',video_url]
+            command = ['ffmpeg', '-re', '-i', video_url]
             if audio_url:
                 command.extend(['-i', audio_url])
             command.extend([
-                '-c:v','libx264','-preset','veryfast',
-                '-vf',f"scale={settings['scale']}",
-                '-b:v',settings['bitrate'],
-                '-maxrate',settings['bitrate'],
-                '-bufsize',settings['bufsize'],
-                '-pix_fmt','yuv420p','-g','50',
-                '-c:a','aac','-b:a','128k','-ar','44100'
+                '-c:v', 'libx264',
+                '-preset', 'veryfast',
+                '-vf', f"scale={settings['scale']}",
+                '-b:v', settings['bitrate'],
+                '-maxrate', settings['bitrate'],
+                '-bufsize', settings['bufsize'],
+                '-pix_fmt', 'yuv420p',
+                '-g', '50',
+                '-c:a', 'aac',
+                '-b:a', '128k',
+                '-ar', '44100'
             ])
             if audio_url:
-                command.extend(['-map','0:v:0','-map','1:a:0'])
+                command.extend(['-map', '0:v:0', '-map', '1:a:0'])
+
             for rtmp_url in rtmp_outputs:
-                command.extend(['-f','flv',rtmp_url])
+                command.extend(['-f', 'flv', rtmp_url])
 
             process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             stream_processes[broadcast.id] = process
@@ -303,9 +251,44 @@ def _run_stream(app, broadcast_id):
                 ).execute()
 
             for line in iter(process.stdout.readline, b''):
-                if not line: break
-                print(f"[FFMPEG {broadcast.id}]: {line.decode('utf-8', errors='ignore').strip()}")
+                if not line:
+                    break
+                print(f"[FFMPEG - broadcast {broadcast.id}]: {line.decode('utf-8', errors='ignore').strip()}")
             process.wait()
 
         except Exception as e:
-            print(f"!!! STREAM FAILED (Broadcast ID {broadcast
+            print(f"!!! STREAM FAILED (Broadcast ID {broadcast.id}) !!! ERROR: {e}")
+            broadcast.status = 'failed'
+        else:
+            if process.returncode == 0:
+                print(f"--- Stream finished successfully (Broadcast ID {broadcast.id}) ---")
+                broadcast.status = 'finished'
+            else:
+                print(f"!!! STREAM FAILED (Broadcast ID {broadcast.id}) !!! FFMPEG exited with code: {process.returncode}")
+                broadcast.status = 'failed'
+        finally:
+            broadcast.end_time = datetime.utcnow()
+            if youtube_service and youtube_broadcast_id:
+                try:
+                    youtube_service.liveBroadcasts().transition(
+                        part='id,snippet,status',
+                        id=youtube_broadcast_id,
+                        broadcastStatus='complete'
+                    ).execute()
+                except HttpError:
+                    pass
+            if broadcast.id in stream_processes:
+                del stream_processes[broadcast.id]
+            db.session.commit()
+
+# --- Health Check ---
+@app.route('/')
+def status():
+    return jsonify({"status": "API is online"})
+
+# --- Create DB ---
+with app.app_context():
+    db.create_all()
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8000)
