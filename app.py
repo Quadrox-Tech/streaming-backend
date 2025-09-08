@@ -54,7 +54,7 @@ class Destination(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     platform = db.Column(db.String(100), nullable=False)
     name = db.Column(db.String(100), nullable=False)
-    stream_key = db.Column(db.String(200), nullable=False) # For custom RTMP, this is the full URL
+    stream_key = db.Column(db.String(200), nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
 
 class Video(db.Model):
@@ -277,12 +277,27 @@ def _run_stream(app, broadcast_id):
                     if not stream_format or stream_format not in ['1080p', '1440p', '2160p', '720p', '480p', '360p', '240p']:
                         stream_format = '480p'
                     
-                    stream_insert = youtube.liveStreams().insert(part="snippet,cdn,status", body={"snippet": {"title": broadcast.title}, "cdn": {"resolution": stream_format, "ingestionType": "rtmp"}}).execute()
+                    ### FINAL FIX ###: Added 'frameRate' to the CDN part of the request.
+                    stream_insert = youtube.liveStreams().insert(
+                        part="snippet,cdn,status", 
+                        body={
+                            "snippet": {"title": broadcast.title}, 
+                            "cdn": {
+                                "resolution": stream_format, 
+                                "frameRate": "variable", # This was the missing piece
+                                "ingestionType": "rtmp"
+                            }
+                        }).execute()
                     stream_yt_id = stream_insert['id']
 
-                    broadcast_insert = youtube.liveBroadcasts().insert(part="snippet,status,contentDetails", body={"snippet": {"title": broadcast.title, "scheduledStartTime": datetime.utcnow().isoformat() + "Z"}, "status": {"privacyStatus": "private"}, "contentDetails": {"streamId": stream_yt_id, "enableAutoStart": True, "enableAutoStop": True}}).execute()
-                    broadcast_yt_id = broadcast_insert['id']
-
+                    broadcast_insert = youtube.liveBroadcasts().insert(
+                        part="snippet,status,contentDetails", 
+                        body={
+                            "snippet": {"title": broadcast.title, "scheduledStartTime": datetime.utcnow().isoformat() + "Z"}, 
+                            "status": {"privacyStatus": "private"}, 
+                            "contentDetails": {"streamId": stream_yt_id, "enableAutoStart": True, "enableAutoStop": True}
+                        }).execute()
+                    
                     ingestion_address = stream_insert['cdn']['ingestionInfo']['ingestionAddress']
                     stream_name = stream_insert['cdn']['ingestionInfo']['streamName']
                     rtmp_outputs.append(f"{ingestion_address}/{stream_name}")
@@ -310,11 +325,9 @@ def _run_stream(app, broadcast_id):
             for rtmp_url in rtmp_outputs:
                 command.extend(['-f', 'flv', rtmp_url])
             
-            # This is the crucial part for debugging. We capture stderr.
             process = subprocess.Popen(command, stderr=subprocess.PIPE, text=True)
             stream_processes[broadcast_id] = process
             
-            # Log ffmpeg's output line by line
             for line in iter(process.stderr.readline, ''):
                 print(f"[FFMPEG - broadcast {broadcast_id}]: {line.strip()}")
             
