@@ -19,7 +19,6 @@ import time
 
 # --- App Initialization & Config ---
 app = Flask(__name__)
-# ... (rest of the config is unchanged)
 CORS(app)
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///db.sqlite3')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -334,26 +333,38 @@ def _run_stream(app, broadcast_id):
 
             video_url, audio_url = (broadcast.source_url, None)
             if "youtube.com" in video_url or "youtu.be" in video_url:
-                yt_dlp_cmd = ['yt-dlp', '-f', 'bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]/best', '-g', video_url]
+                base_yt_dlp_cmd = ['yt-dlp', '-f', 'bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]/best', '-g', video_url]
                 
-                # *** THE FINAL FIX ***
-                # Always add the cookies file as a fallback for public videos.
-                yt_dlp_cmd.extend(['--cookies', '/app/cookies.txt'])
-
-                if yt_dlp_creds:
-                    yt_dlp_creds.refresh(google_requests.Request())
-                    access_token = yt_dlp_creds.token
-                    yt_dlp_cmd.extend(['--add-header', f'Authorization: Bearer {access_token}'])
-
+                # *** THE FINAL INTELLIGENT AUTH LOGIC ***
                 try:
-                    result = subprocess.run(yt_dlp_cmd, capture_output=True, text=True, check=True, timeout=60)
-                    if not result.stdout or not result.stdout.strip():
-                        raise Exception("yt-dlp ran but returned no URLs.")
-                    urls = result.stdout.strip().split('\n')
-                    video_url = urls[0]; audio_url = urls[1] if len(urls) > 1 else None
-                except subprocess.CalledProcessError as e:
-                    print(f"!!! YT-DLP FAILED !!!\nError: {e.stderr}")
-                    raise Exception("yt-dlp failed to get video URLs.")
+                    # Attempt 1: Try with OAuth first (for private/unlisted videos)
+                    if yt_dlp_creds:
+                        print(f"--- [Broadcast {broadcast.id}] Attempting yt-dlp with user's OAuth token... ---")
+                        yt_dlp_creds.refresh(google_requests.Request())
+                        access_token = yt_dlp_creds.token
+                        
+                        oauth_cmd = base_yt_dlp_cmd + ['--add-header', f'Authorization: Bearer {access_token}']
+                        result = subprocess.run(oauth_cmd, capture_output=True, text=True, check=True, timeout=60)
+                    else:
+                        # If no OAuth creds are available, skip straight to the cookie method
+                        raise ValueError("No OAuth credentials available for this user.")
+
+                except (subprocess.CalledProcessError, ValueError, AttributeError) as e:
+                    # Attempt 2: If OAuth fails for any reason, fall back to using cookies
+                    print(f"--- [Broadcast {broadcast.id}] OAuth method failed ({e}). Retrying with cookies file... ---")
+                    cookie_cmd = base_yt_dlp_cmd + ['--cookies', '/app/cookies.txt']
+                    try:
+                        result = subprocess.run(cookie_cmd, capture_output=True, text=True, check=True, timeout=60)
+                    except subprocess.CalledProcessError as final_e:
+                        print(f"!!! YT-DLP FAILED on both attempts !!!\nFinal Error: {final_e.stderr}")
+                        raise Exception("yt-dlp failed to get video URLs with all available methods.")
+
+                if not result.stdout or not result.stdout.strip():
+                    raise Exception("yt-dlp succeeded but returned no URLs.")
+                
+                urls = result.stdout.strip().split('\n')
+                video_url = urls[0]; audio_url = urls[1] if len(urls) > 1 else None
+                print(f"--- [Broadcast {broadcast.id}] yt-dlp successful. ---")
 
             settings = {'scale': '854:480', 'bitrate': '900k', 'bufsize': '1800k'}
             if broadcast.resolution == '720p': settings = {'scale': '1280:720', 'bitrate': '1800k', 'bufsize': '3600k'}
