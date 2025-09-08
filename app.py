@@ -421,4 +421,4 @@ def _run_stream(app, broadcast_id):
                 broadcast.status = 'failed'; db.session.commit()
                 return
 
-            video_url, audio
+          return video_url, audio
