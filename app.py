@@ -213,11 +213,9 @@ def get_all_possible_destinations():
         try:
             creds = Credentials(None, refresh_token=account.refresh_token, token_uri='https://oauth2.googleapis.com/token', client_id=GOOGLE_CLIENT_ID, client_secret=GOOGLE_CLIENT_SECRET)
             youtube = build('youtube', 'v3', credentials=creds)
-            channel_response = youtube.channels().list(part='status', mine=True).execute()
-            if channel_response.get('items') and channel_response['items'][0]['status'].get('longUploadsStatus') == 'allowed':
-                 dest_info.update({"eligible": True, "reason": ""})
-            else:
-                 dest_info.update({"eligible": False, "reason": "Channel not enabled for live streaming."})
+            streams_response = youtube.liveStreams().list(part='id,snippet,status', mine=True).execute()
+            if streams_response.get('items'): dest_info.update({"eligible": True, "reason": ""})
+            else: dest_info.update({"eligible": False, "reason": "Channel not enabled for live streaming."})
         except HttpError as e:
             print(f"YouTube API HttpError: {e}")
             dest_info.update({"eligible": False, "reason": "API Error: Could not verify channel."})
@@ -245,7 +243,7 @@ def create_broadcast():
 
     if not dest_names: return jsonify({"error": "Invalid destination IDs"}), 400
     
-    broadcast = Broadcast(user_id=user_id, source_url=source_url, title=title, destinations_used=", ".join(dest_names), destination_ids_used=json.dumps(destination_ids), resolution=resolution)
+    broadcast = Broadcast(user_id=user_id, source_url=source_url, title=title, destinations_used=", ".join(dest_names), destination_ids_used=json.dumps(destination_ids))
     db.session.add(broadcast); db.session.commit()
     return jsonify(single_broadcast_schema.dump(broadcast)), 201
 
@@ -256,35 +254,12 @@ def get_broadcasts():
     broadcasts = Broadcast.query.filter(Broadcast.user_id == get_jwt_identity(),(Broadcast.start_time > thirty_days_ago) | (Broadcast.status.in_(['live', 'pending']))).order_by(db.desc(Broadcast.id)).all()
     return jsonify(broadcasts_schema.dump(broadcasts))
 
-def _wait_for_stream_active(youtube_service, stream_id, timeout=120):
-    """Polls the YouTube API until the stream status is 'active'."""
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        try:
-            response = youtube_service.liveStreams().list(
-                part='status',
-                id=stream_id
-            ).execute()
-
-            if response.get('items'):
-                stream_status = response['items'][0]['status']['streamStatus']
-                print(f"[YouTube Check] Stream '{stream_id}' status is: {stream_status}")
-                if stream_status == 'active':
-                    return True
-            time.sleep(5)
-        except HttpError as e:
-            print(f"Error checking stream status: {e}")
-            time.sleep(5)
-    return False
-
 def _run_stream(app, broadcast_id):
     with app.app_context():
         broadcast = Broadcast.query.get(broadcast_id)
         process = None
         youtube_service = None
         youtube_broadcast_id = None
-        stream_yt_id = None
-        
         try:
             rtmp_outputs = []
             destination_ids = json.loads(broadcast.destination_ids_used)
@@ -310,7 +285,7 @@ def _run_stream(app, broadcast_id):
                     stream_insert = youtube_service.liveStreams().insert(part="snippet,cdn,status", body={"snippet": {"title": broadcast.title}, "cdn": {"resolution": stream_format, "frameRate": "30fps", "ingestionType": "rtmp"}}).execute()
                     stream_yt_id = stream_insert['id']
 
-                    broadcast_insert = youtube_service.liveBroadcasts().insert(part="snippet,status,contentDetails", body={"snippet": {"title": broadcast.title, "scheduledStartTime": datetime.utcnow().isoformat() + "Z"}, "status": {"privacyStatus": "public"}, "contentDetails": {"streamId": stream_yt_id, "enableAutoStart": False, "enableAutoStop": True}}).execute()
+                    broadcast_insert = youtube_service.liveBroadcasts().insert(part="snippet,status,contentDetails", body={"snippet": {"title": broadcast.title, "scheduledStartTime": datetime.utcnow().isoformat() + "Z"}, "status": {"privacyStatus": "public"}, "contentDetails": {"streamId": stream_yt_id, "enableAutoStop": True}}).execute()
                     youtube_broadcast_id = broadcast_insert['id']
                     broadcast.youtube_broadcast_id = youtube_broadcast_id
                     db.session.commit()
@@ -345,20 +320,20 @@ def _run_stream(app, broadcast_id):
             process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             stream_processes[broadcast.id] = process
             
-            if youtube_service and youtube_broadcast_id and stream_yt_id:
-                if _wait_for_stream_active(youtube_service, stream_yt_id):
-                    print("--- Stream is active. Waiting 7 seconds for stability before transitioning... ---")
-                    time.sleep(7)
-                    
-                    print("--- Transitioning broadcast to LIVE. ---")
-                    youtube_service.liveBroadcasts().transition(
-                        part='id,snippet,status', 
-                        id=youtube_broadcast_id, 
-                        broadcastStatus='live'
-                    ).execute()
+            if youtube_service and youtube_broadcast_id:
+                # Poll for stream health
+                for _ in range(20): # Try for up to 100 seconds
+                    time.sleep(5)
+                    broadcast_status = youtube_service.liveBroadcasts().list(part='snippet,status', id=youtube_broadcast_id).execute()
+                    health_status = broadcast_status['items'][0]['status']['healthStatus']['status']
+                    print(f"--- YouTube stream health check: {health_status} ---")
+                    if health_status == 'good':
+                        youtube_service.liveBroadcasts().transition(part='id,snippet,status', id=youtube_broadcast_id, broadcastStatus='live').execute()
+                        print(f"--- YouTube Broadcast {youtube_broadcast_id} transitioned to LIVE ---")
+                        break
                 else:
-                    raise Exception("Stream did not become active on YouTube within the timeout period.")
-
+                    print("--- YouTube stream never became healthy. ---")
+            
             for line in iter(process.stdout.readline, b''):
                 if not line: break
                 print(f"[FFMPEG - broadcast {broadcast.id}]: {line.decode('utf-8', errors='ignore').strip()}")
@@ -378,9 +353,9 @@ def _run_stream(app, broadcast_id):
             broadcast.end_time = datetime.utcnow()
             if youtube_service and youtube_broadcast_id:
                 try:
-                    print(f"--- Broadcast {youtube_broadcast_id} is ending. ---")
-                except HttpError as e: 
-                    print(f"Could not transition broadcast to complete: {e}")
+                    youtube_service.liveBroadcasts().transition(part='id,snippet,status', id=youtube_broadcast_id, broadcastStatus='complete').execute()
+                    print(f"--- YouTube Broadcast {youtube_broadcast_id} transitioned to COMPLETE ---")
+                except HttpError: pass
             if broadcast.id in stream_processes:
                 del stream_processes[broadcast.id]
             db.session.commit()
