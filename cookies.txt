@@ -1,0 +1,7 @@
+Netscape HTTP Cookie File
+This is a placeholder. For production, you would export this from your browser
+after logging into YouTube. The format is a series of tab-separated values.
+https://www.google.com/search?q=.youtube.com	TRUE	/	TRUE	1799999999	LOGIN_INFO	[PLACEHOLDER_VALUE]
+https://www.google.com/search?q=.youtube.com	TRUE	/	TRUE	1799999999	PREF	[PLACEHOLDER_VALUE]
+https://www.google.com/search?q=.youtube.com	TRUE	/	TRUE	1799999999	VISITOR_INFO1_LIVE	[PLACEHOLDER_VALUE]
+https://www.google.com/search?q=.youtube.com	TRUE	/	TRUE	1799999999	YSC	[PLACEHOLDER_VALUE]
