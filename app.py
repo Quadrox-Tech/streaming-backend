@@ -250,6 +250,7 @@ def get_broadcasts():
     broadcasts = Broadcast.query.filter(Broadcast.user_id == get_jwt_identity(),(Broadcast.start_time > thirty_days_ago) | (Broadcast.status == 'live') | (Broadcast.status == 'pending')).order_by(db.desc(Broadcast.id)).all()
     return jsonify(broadcasts_schema.dump(broadcasts))
 
+### FIX ###: The entire start_stream function is rewritten for the correct API flow.
 @app.route('/api/broadcasts/<int:broadcast_id>/start', methods=['POST'])
 @jwt_required()
 def start_stream(broadcast_id):
@@ -257,11 +258,14 @@ def start_stream(broadcast_id):
     broadcast = Broadcast.query.get(broadcast_id)
     if not broadcast or str(broadcast.user_id) != user_id or broadcast.status != 'pending':
         return jsonify({"error": "Broadcast not found or not pending"}), 404
+    if broadcast_id in stream_processes and stream_processes.get(broadcast_id).poll() is None:
+        return jsonify({"error": "Stream already running"}), 400
 
     try:
         rtmp_outputs = []
         destination_ids = json.loads(broadcast.destination_ids_used)
 
+        # Build the list of RTMP URLs first
         for dest_id_str in destination_ids:
             if dest_id_str.startswith('manual-'):
                 db_id = int(dest_id_str.split('-')[1])
@@ -276,28 +280,27 @@ def start_stream(broadcast_id):
                 creds = Credentials(None, refresh_token=account.refresh_token, token_uri='https://oauth2.googleapis.com/token', client_id=GOOGLE_CLIENT_ID, client_secret=GOOGLE_CLIENT_SECRET)
                 youtube = build('youtube', 'v3', credentials=creds)
                 
-                # ### FIX ###: Removed `"contentDetails": {"enableAutoStart": True}` to fix the resolution error
-                broadcast_insert = youtube.liveBroadcasts().insert(
-                    part="snippet,status",
-                    body={
-                        "snippet": {"title": broadcast.title, "scheduledStartTime": datetime.utcnow().isoformat() + "Z"},
-                        "status": {"privacyStatus": "private"}
-                    }).execute()
-                broadcast_yt_id = broadcast_insert['id']
-
+                # Step 1: Create the Live Stream object with resolution
                 stream_insert = youtube.liveStreams().insert(
-                    part="snippet,cdn",
+                    part="snippet,cdn,status",
                     body={
                         "snippet": {"title": broadcast.title},
                         "cdn": {"format": broadcast.resolution, "ingestionType": "rtmp"}
                     }).execute()
                 stream_yt_id = stream_insert['id']
-                
-                youtube.liveBroadcasts().bind(
-                    part="id",
-                    id=broadcast_yt_id,
-                    streamId=stream_yt_id
-                ).execute()
+
+                # Step 2: Create the Live Broadcast and bind it to the stream immediately
+                broadcast_insert = youtube.liveBroadcasts().insert(
+                    part="snippet,status,contentDetails",
+                    body={
+                        "snippet": {"title": broadcast.title, "scheduledStartTime": datetime.utcnow().isoformat() + "Z"},
+                        "status": {"privacyStatus": "private"},
+                        "contentDetails": {
+                            "streamId": stream_yt_id,
+                            "enableAutoStart": True,
+                            "enableAutoStop": True
+                        }
+                    }).execute()
 
                 ingestion_address = stream_insert['cdn']['ingestionInfo']['ingestionAddress']
                 stream_name = stream_insert['cdn']['ingestionInfo']['streamName']
@@ -306,15 +309,14 @@ def start_stream(broadcast_id):
         if not rtmp_outputs:
             return jsonify({"error": "No valid stream destinations found."}), 400
 
-        video_url, audio_url = None, None
-        if "youtube.com" in broadcast.source_url or "youtu.be" in broadcast.source_url:
-            yt_dlp_cmd = ['yt-dlp', '-f', 'bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4][height<=720]/best', '-g', broadcast.source_url]
+        # Now, build and run the FFmpeg command
+        video_url, audio_url = (broadcast.source_url, None)
+        if "youtube.com" in video_url or "youtu.be" in video_url:
+            yt_dlp_cmd = ['yt-dlp', '-f', 'bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]/best', '-g', video_url]
             result = subprocess.run(yt_dlp_cmd, capture_output=True, text=True, check=True)
             urls = result.stdout.strip().split('\n')
             video_url = urls[0]
             if len(urls) > 1: audio_url = urls[1]
-        else:
-            video_url = broadcast.source_url
 
         settings = {'scale': '854:480', 'bitrate': '900k', 'bufsize': '1800k'}
         if broadcast.resolution == '720p': settings = {'scale': '1280:720', 'bitrate': '1800k', 'bufsize': '3600k'}
@@ -327,14 +329,13 @@ def start_stream(broadcast_id):
         for rtmp_url in rtmp_outputs:
             command.extend(['-f', 'flv', rtmp_url])
 
-        broadcast.status = 'live'; broadcast.start_time = datetime.utcnow(); db.session.commit()
-        
         print("--- Starting FFmpeg with command: ---")
         print(shlex.join(command))
         
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stream_processes[broadcast_id] = process
         
+        broadcast.status = 'live'; broadcast.start_time = datetime.utcnow(); db.session.commit()
         return jsonify({"message": "Stream started"})
 
     except subprocess.CalledProcessError as e:
@@ -344,7 +345,7 @@ def start_stream(broadcast_id):
     except HttpError as e:
         broadcast.status = 'failed'; db.session.commit()
         print(f"YouTube API error: {e}")
-        return jsonify({"error": "An error occurred with the YouTube API."}), 500
+        return jsonify({"error": f"An error occurred with the YouTube API: {e.reason}"}), 500
     except Exception as e:
         broadcast.status = 'failed'; db.session.commit()
         print(f"A general error occurred: {e}")
