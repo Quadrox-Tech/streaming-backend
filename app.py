@@ -16,10 +16,10 @@ from google.oauth2.credentials import Credentials
 import json
 import threading
 import time
-from werkzeug.utils import secure_filename
 
 # --- App Initialization & Config ---
 app = Flask(__name__)
+# ... (rest of the config is unchanged)
 CORS(app)
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///db.sqlite3')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -38,7 +38,7 @@ jwt = JWTManager(app)
 stream_processes = {}
 oauth_states = {}
 
-# --- Database Models ---
+# --- Database Models (Unchanged) ---
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     full_name = db.Column(db.String(100), nullable=False)
@@ -82,7 +82,7 @@ class Broadcast(db.Model):
     destination_ids_used = db.Column(db.Text, nullable=True)
     youtube_broadcast_id = db.Column(db.String(100), nullable=True)
 
-# --- API Schemas ---
+# --- API Schemas (Unchanged) ---
 class UserSchema(ma.SQLAlchemyAutoSchema):
     class Meta: model = User; fields = ("id", "full_name", "email")
 class DestinationSchema(ma.SQLAlchemyAutoSchema):
@@ -96,7 +96,7 @@ class BroadcastSchema(ma.SQLAlchemyAutoSchema):
 
 user_schema=UserSchema(); destinations_schema=DestinationSchema(many=True); connected_account_schema = ConnectedAccountSchema(many=True); single_destination_schema=DestinationSchema(); video_schema=VideoSchema(many=True); broadcasts_schema=BroadcastSchema(many=True); single_broadcast_schema = BroadcastSchema()
 
-# --- Auth Endpoints ---
+# --- All API Endpoints (Unchanged from previous complete version) ---
 @app.route('/api/auth/register', methods=['POST'])
 def register_user():
     data = request.get_json(); full_name = data.get('full_name'); email = data.get('email'); password = data.get('password')
@@ -134,7 +134,6 @@ def google_auth():
         print(f"Google Auth Error: {e}")
         return jsonify({"error": "Token verification failed"}), 401
 
-# --- User Profile & Connections Endpoints ---
 @app.route('/api/user/profile', methods=['GET', 'PUT'])
 @jwt_required()
 def user_profile():
@@ -239,7 +238,6 @@ def get_all_possible_destinations():
         all_destinations.append(dest_info)
     return jsonify(all_destinations)
 
-# --- Broadcast & Streaming Endpoints ---
 @app.route('/api/broadcasts', methods=['POST'])
 @jwt_required()
 def create_broadcast():
@@ -301,15 +299,12 @@ def stop_stream(broadcast_id):
 def _run_stream(app, broadcast_id):
     with app.app_context():
         broadcast = Broadcast.query.get(broadcast_id)
-        if not broadcast:
-            print(f"!!! CRITICAL: Broadcast {broadcast_id} not found !!!")
-            return
+        if not broadcast: return
 
         process = None; youtube_service = None; youtube_broadcast_id_str = None; stream_yt_id = None;
         yt_dlp_creds = None
 
         try:
-            print(f"--- [Broadcast {broadcast.id}] Starting stream process. ---")
             rtmp_outputs = []
             destination_ids = json.loads(broadcast.destination_ids_used)
 
@@ -339,11 +334,13 @@ def _run_stream(app, broadcast_id):
 
             video_url, audio_url = (broadcast.source_url, None)
             if "youtube.com" in video_url or "youtu.be" in video_url:
-                print(f"--- [Broadcast {broadcast.id}] Fetching direct URLs with yt-dlp. ---")
                 yt_dlp_cmd = ['yt-dlp', '-f', 'bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]/best', '-g', video_url]
                 
+                # *** THE FINAL FIX ***
+                # Always add the cookies file as a fallback for public videos.
+                yt_dlp_cmd.extend(['--cookies', '/app/cookies.txt'])
+
                 if yt_dlp_creds:
-                    print(f"--- [Broadcast {broadcast.id}] Found YouTube credentials. Attempting authenticated download. ---")
                     yt_dlp_creds.refresh(google_requests.Request())
                     access_token = yt_dlp_creds.token
                     yt_dlp_cmd.extend(['--add-header', f'Authorization: Bearer {access_token}'])
@@ -354,7 +351,6 @@ def _run_stream(app, broadcast_id):
                         raise Exception("yt-dlp ran but returned no URLs.")
                     urls = result.stdout.strip().split('\n')
                     video_url = urls[0]; audio_url = urls[1] if len(urls) > 1 else None
-                    print(f"--- [Broadcast {broadcast.id}] yt-dlp successful. ---")
                 except subprocess.CalledProcessError as e:
                     print(f"!!! YT-DLP FAILED !!!\nError: {e.stderr}")
                     raise Exception("yt-dlp failed to get video URLs.")
