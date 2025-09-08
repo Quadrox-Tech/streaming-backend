@@ -273,8 +273,10 @@ def get_youtube_credentials(refresh_token):
         raise
 def create_youtube_stream(youtube_service, broadcast_title, resolution):
     try:
-        cdn_settings = {"format": "1080p" if resolution == "1080p" else "720p" if resolution == "720p" else "480p", "ingestionType": "rtmp", "frameRate": "30fps"}
-        stream_body = {"snippet": {"title": f"{broadcast_title} - Stream"}, "cdn": cdn_settings}
+        # *** THE FIX IS HERE ***
+        # The key was "resolution", not "format"
+        cdn_settings = {"resolution": "1080p" if resolution == "1080p" else "720p" if resolution == "720p" else "480p", "ingestionType": "rtmp", "frameRate": "30fps"}
+        stream_body = {"snippet": {"title": f"{broadcast_title} - Stream"}, "cdn": cdn_settings, "status": {"streamStatus": "active"}}
         stream_response = youtube_service.liveStreams().insert(part="snippet,cdn,status", body=stream_body).execute()
         stream_id = stream_response['id']
         ingestion_info = stream_response['cdn']['ingestionInfo']
@@ -292,7 +294,6 @@ def _run_stream(app, broadcast_id):
     with app.app_context():
         broadcast = Broadcast.query.get(broadcast_id)
         if not broadcast: logger.error(f"Broadcast {broadcast_id} not found"); return
-
         process = None; youtube_streams = []
         try:
             logger.info(f"Starting stream for broadcast {broadcast_id}: {broadcast.title}")
@@ -315,9 +316,7 @@ def _run_stream(app, broadcast_id):
                     except Exception as e:
                         logger.error(f"Failed to setup YouTube stream for account {db_id}: {e}")
                         continue
-            
             if not rtmp_outputs: raise Exception("No valid RTMP outputs configured")
-            
             video_url = broadcast.source_url; audio_url = None
             if "youtube.com" in video_url or "youtu.be" in video_url:
                 logger.info("Processing YouTube source URL...")
@@ -331,27 +330,19 @@ def _run_stream(app, broadcast_id):
                     logger.info(f"yt-dlp extracted URLs successfully.")
                 except subprocess.CalledProcessError as e:
                     logger.error(f"yt-dlp failed: {e.stderr}"); raise Exception("Failed to extract video URLs.")
-            
             resolution_settings = {'480p': {'scale': '854:480', 'bitrate': '1000k'}, '720p': {'scale': '1280:720', 'bitrate': '2500k'}, '1080p': {'scale': '1920:1080', 'bitrate': '4000k'}}
             settings = resolution_settings.get(broadcast.resolution, resolution_settings['480p'])
-            
             ffmpeg_cmd = ['ffmpeg', '-re', '-i', video_url]
             if audio_url: ffmpeg_cmd.extend(['-i', audio_url])
             ffmpeg_cmd.extend(['-c:v', 'libx264', '-preset', 'veryfast', '-b:v', settings['bitrate'], '-maxrate', settings['bitrate'], '-bufsize', f"{int(settings['bitrate'].replace('k',''))*2}k", '-pix_fmt', 'yuv420p', '-g', '60', '-c:a', 'aac', '-b:a', '128k', '-ar', '44100'])
             if audio_url: ffmpeg_cmd.extend(['-map', '0:v:0', '-map', '1:a:0'])
-            
             for rtmp_url in rtmp_outputs:
                 ffmpeg_cmd.extend(['-f', 'flv', rtmp_url])
-            
             logger.info(f"Starting FFmpeg with {len(rtmp_outputs)} outputs")
             process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE)
             stream_processes[broadcast_id] = process
-            
-            # *** THE FINAL FIX: NO HEALTH CHECK LOOP NEEDED WITH enableAutoStart:True ***
-            # We just wait for the process to finish on its own. YouTube handles the rest.
             logger.info("FFmpeg started successfully, monitoring process...")
             stdout, stderr = process.communicate()
-            
             if process.returncode == 0:
                 logger.info("FFmpeg completed successfully")
                 broadcast.status = 'finished'
@@ -359,13 +350,10 @@ def _run_stream(app, broadcast_id):
                 logger.error(f"FFmpeg failed with exit code {process.returncode}")
                 logger.error(f"FFmpeg stderr: {stderr.decode('utf-8', errors='ignore')}")
                 broadcast.status = 'failed'
-                
         except Exception as e:
             logger.error(f"Stream failed for broadcast {broadcast_id}: {e}")
             broadcast.status = 'failed'
-            if process and process.poll() is None:
-                process.kill()
-                    
+            if process and process.poll() is None: process.kill()
         finally:
             broadcast.end_time = datetime.utcnow()
             for yt_stream in youtube_streams:
@@ -377,7 +365,6 @@ def _run_stream(app, broadcast_id):
                     yt_stream['service'].liveStreams().delete(id=yt_stream['stream_id']).execute()
                 except HttpError as e:
                     logger.warning(f"Could not delete stream {yt_stream['stream_id']}: {e}")
-            
             if broadcast_id in stream_processes: del stream_processes[broadcast_id]
             db.session.commit()
             logger.info(f"Stream cleanup completed for broadcast {broadcast_id}")
