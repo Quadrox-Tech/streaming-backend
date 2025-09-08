@@ -250,7 +250,7 @@ def get_broadcasts():
     broadcasts = Broadcast.query.filter(Broadcast.user_id == get_jwt_identity(),(Broadcast.start_time > thirty_days_ago) | (Broadcast.status == 'live') | (Broadcast.status == 'pending')).order_by(db.desc(Broadcast.id)).all()
     return jsonify(broadcasts_schema.dump(broadcasts))
 
-### FIX ###: The entire start_stream function is rewritten for the correct API flow.
+### FIX ###: The entire start_stream function is rewritten with logging and safeguards.
 @app.route('/api/broadcasts/<int:broadcast_id>/start', methods=['POST'])
 @jwt_required()
 def start_stream(broadcast_id):
@@ -258,14 +258,11 @@ def start_stream(broadcast_id):
     broadcast = Broadcast.query.get(broadcast_id)
     if not broadcast or str(broadcast.user_id) != user_id or broadcast.status != 'pending':
         return jsonify({"error": "Broadcast not found or not pending"}), 404
-    if broadcast_id in stream_processes and stream_processes.get(broadcast_id).poll() is None:
-        return jsonify({"error": "Stream already running"}), 400
-
+    
     try:
         rtmp_outputs = []
         destination_ids = json.loads(broadcast.destination_ids_used)
 
-        # Build the list of RTMP URLs first
         for dest_id_str in destination_ids:
             if dest_id_str.startswith('manual-'):
                 db_id = int(dest_id_str.split('-')[1])
@@ -279,37 +276,37 @@ def start_stream(broadcast_id):
                 
                 creds = Credentials(None, refresh_token=account.refresh_token, token_uri='https://oauth2.googleapis.com/token', client_id=GOOGLE_CLIENT_ID, client_secret=GOOGLE_CLIENT_SECRET)
                 youtube = build('youtube', 'v3', credentials=creds)
+
+                # Step 1: Add logging and a safeguard for the resolution
+                stream_format = broadcast.resolution
+                if not stream_format or stream_format not in ['1080p', '1440p', '2160p', '720p', '480p', '360p', '240p']:
+                    print(f"!!! Invalid or missing resolution detected: '{stream_format}'. Defaulting to 480p.")
+                    stream_format = '480p'
                 
-                # Step 1: Create the Live Stream object with resolution
-                stream_insert = youtube.liveStreams().insert(
-                    part="snippet,cdn,status",
-                    body={
-                        "snippet": {"title": broadcast.title},
-                        "cdn": {"format": broadcast.resolution, "ingestionType": "rtmp"}
-                    }).execute()
+                print(f"--- Creating YouTube Live Stream. Title: '{broadcast.title}', Resolution: '{stream_format}' ---")
+
+                stream_insert_body = {
+                    "snippet": {"title": broadcast.title},
+                    "cdn": {"format": stream_format, "ingestionType": "rtmp"}
+                }
+                
+                stream_insert = youtube.liveStreams().insert(part="snippet,cdn,status", body=stream_insert_body).execute()
                 stream_yt_id = stream_insert['id']
 
-                # Step 2: Create the Live Broadcast and bind it to the stream immediately
                 broadcast_insert = youtube.liveBroadcasts().insert(
                     part="snippet,status,contentDetails",
                     body={
                         "snippet": {"title": broadcast.title, "scheduledStartTime": datetime.utcnow().isoformat() + "Z"},
                         "status": {"privacyStatus": "private"},
-                        "contentDetails": {
-                            "streamId": stream_yt_id,
-                            "enableAutoStart": True,
-                            "enableAutoStop": True
-                        }
+                        "contentDetails": {"streamId": stream_yt_id, "enableAutoStart": True, "enableAutoStop": True}
                     }).execute()
 
                 ingestion_address = stream_insert['cdn']['ingestionInfo']['ingestionAddress']
                 stream_name = stream_insert['cdn']['ingestionInfo']['streamName']
                 rtmp_outputs.append(f"{ingestion_address}/{stream_name}")
 
-        if not rtmp_outputs:
-            return jsonify({"error": "No valid stream destinations found."}), 400
+        if not rtmp_outputs: return jsonify({"error": "No valid stream destinations found."}), 400
 
-        # Now, build and run the FFmpeg command
         video_url, audio_url = (broadcast.source_url, None)
         if "youtube.com" in video_url or "youtu.be" in video_url:
             yt_dlp_cmd = ['yt-dlp', '-f', 'bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]/best', '-g', video_url]
