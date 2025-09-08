@@ -278,10 +278,25 @@ def _run_stream(app, broadcast_id):
                     if not stream_format or stream_format not in ['1080p', '1440p', '2160p', '720p', '480p', '360p', '240p']:
                         stream_format = '480p'
                     
-                    stream_insert = youtube.liveStreams().insert(part="snippet,cdn,status", body={"snippet": {"title": broadcast.title}, "cdn": {"resolution": stream_format, "frameRate": "variable", "ingestionType": "rtmp"}}).execute()
+                    stream_insert = youtube.liveStreams().insert(
+                        part="snippet,cdn,status", 
+                        body={
+                            "snippet": {"title": broadcast.title}, 
+                            "cdn": {
+                                "resolution": stream_format, 
+                                "frameRate": "30fps", # Final Fix: Changed from 'variable'
+                                "ingestionType": "rtmp"
+                            }
+                        }).execute()
                     stream_yt_id = stream_insert['id']
 
-                    broadcast_insert = youtube.liveBroadcasts().insert(part="snippet,status,contentDetails", body={"snippet": {"title": broadcast.title, "scheduledStartTime": datetime.utcnow().isoformat() + "Z"}, "status": {"privacyStatus": "private"}, "contentDetails": {"streamId": stream_yt_id, "enableAutoStart": True, "enableAutoStop": True}}).execute()
+                    broadcast_insert = youtube.liveBroadcasts().insert(
+                        part="snippet,status,contentDetails", 
+                        body={
+                            "snippet": {"title": broadcast.title, "scheduledStartTime": datetime.utcnow().isoformat() + "Z"}, 
+                            "status": {"privacyStatus": "private"}, 
+                            "contentDetails": {"streamId": stream_yt_id, "enableAutoStart": True, "enableAutoStop": True}
+                        }).execute()
                     
                     ingestion_address = stream_insert['cdn']['ingestionInfo']['ingestionAddress']
                     stream_name = stream_insert['cdn']['ingestionInfo']['streamName']
