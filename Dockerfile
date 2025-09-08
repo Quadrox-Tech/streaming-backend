@@ -1,7 +1,7 @@
 # 1. Start with an official Python base image
 FROM python:3.10-slim
 
-# 2. Install FFmpeg
+# 2. Install FFmpeg and wget
 RUN apt-get update && apt-get install -y ffmpeg wget
 
 # 3. *** THE FIX ***
@@ -27,4 +27,5 @@ EXPOSE 8000
 
 # 9. Define the command to run your app using gunicorn
 CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:app"]
+
 
