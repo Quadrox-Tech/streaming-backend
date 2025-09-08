@@ -29,7 +29,7 @@ app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY', 'default-super-s
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=24)
 GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
 GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET')
-REDIRECT_URI = 'https://smartnaijaservices.com.ng/youtube-callback.html' 
+REDIRECT_URI = 'https://smartnaijaservices.com.ng/youtube-callback.html'
 FRONTEND_URL = 'https://smartnaijaservices.com.ng'
 
 db = SQLAlchemy(app)
@@ -70,7 +70,7 @@ class ConnectedAccount(db.Model):
     account_name = db.Column(db.String(100), nullable=False)
     refresh_token = db.Column(db.String(500), nullable=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    
+
 class Broadcast(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     title = db.Column(db.String(200), nullable=False)
@@ -116,7 +116,7 @@ def login_user():
     if user and user.password_hash and bcrypt.check_password_hash(user.password_hash, password):
         return jsonify(access_token=create_access_token(identity=str(user.id)))
     return jsonify({"error": "Invalid credentials"}), 401
-    
+
 @app.route('/api/auth/google', methods=['POST'])
 def google_auth():
     data = request.get_json(); token = data.get('token')
@@ -229,7 +229,7 @@ def create_broadcast():
     user_id = get_jwt_identity(); data = request.get_json()
     title = data.get('title'); source_url = data.get('source_url'); destination_ids = data.get('destination_ids'); resolution = data.get('resolution', '480p')
     if not all([title, source_url, destination_ids]): return jsonify({"error": "Missing required fields"}), 400
-    
+
     dest_names = []
     for dest_id_str in destination_ids:
         if dest_id_str.startswith('manual-'):
@@ -242,7 +242,7 @@ def create_broadcast():
             if acc and str(acc.user_id) == user_id: dest_names.append(f"YouTube: {acc.account_name}")
 
     if not dest_names: return jsonify({"error": "Invalid destination IDs"}), 400
-    
+
     broadcast = Broadcast(user_id=user_id, source_url=source_url, title=title, destinations_used=", ".join(dest_names), destination_ids_used=json.dumps(destination_ids), resolution=resolution)
     db.session.add(broadcast); db.session.commit()
     return jsonify(single_broadcast_schema.dump(broadcast)), 201
@@ -274,14 +274,14 @@ def _run_stream(app, broadcast_id):
                     db_id = int(dest_id_str.split('-')[1])
                     account = ConnectedAccount.query.get(db_id)
                     if not account: continue
-                    
+
                     creds = Credentials(None, refresh_token=account.refresh_token, token_uri='https://oauth2.googleapis.com/token', client_id=GOOGLE_CLIENT_ID, client_secret=GOOGLE_CLIENT_SECRET)
                     youtube_service = build('youtube', 'v3', credentials=creds)
-                    
+
                     stream_format = broadcast.resolution
                     if not stream_format or stream_format not in ['1080p', '1440p', '2160p', '720p', '480p', '360p', '240p']:
                         stream_format = '480p'
-                    
+
                     stream_insert = youtube_service.liveStreams().insert(
                         part="snippet,cdn,status",
                         body={
@@ -291,7 +291,6 @@ def _run_stream(app, broadcast_id):
                     ).execute()
                     stream_yt_id = stream_insert['id']
 
-                    # FIX: make broadcast go live immediately (not scheduled)
                     broadcast_insert = youtube_service.liveBroadcasts().insert(
                         part="snippet,status,contentDetails",
                         body={
@@ -310,7 +309,7 @@ def _run_stream(app, broadcast_id):
                     youtube_broadcast_id = broadcast_insert['id']
                     broadcast.youtube_broadcast_id = youtube_broadcast_id
                     db.session.commit()
-                    
+
                     ingestion_address = stream_insert['cdn']['ingestionInfo']['ingestionAddress']
                     stream_name = stream_insert['cdn']['ingestionInfo']['streamName']
                     rtmp_outputs.append(f"{ingestion_address}/{stream_name}")
@@ -328,8 +327,4 @@ def _run_stream(app, broadcast_id):
                 if len(urls) > 1: audio_url = urls[1]
 
             settings = {'scale': '854:480', 'bitrate': '900k', 'bufsize': '1800k'}
-            if broadcast.resolution == '720p': settings = {'scale': '1280:720', 'bitrate': '1800k', 'bufsize': '3600k'}
-
-            command = ['ffmpeg', '-re', '-i', video_url]
-            if audio_url: command.extend(['-i', audio_url])
-            command.extend(['-c:v', 'libx264', '-preset', 'veryfast', '-vf',
+            if broadcast.resolution == '720p': settings = {'scale': '1280:720', 'bitrate': '1800k', 'bufsize': '360
