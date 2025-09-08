@@ -282,10 +282,31 @@ def _run_stream(app, broadcast_id):
                     if not stream_format or stream_format not in ['1080p', '1440p', '2160p', '720p', '480p', '360p', '240p']:
                         stream_format = '480p'
                     
-                    stream_insert = youtube_service.liveStreams().insert(part="snippet,cdn,status", body={"snippet": {"title": broadcast.title}, "cdn": {"resolution": stream_format, "frameRate": "30fps", "ingestionType": "rtmp"}}).execute()
+                    stream_insert = youtube_service.liveStreams().insert(
+                        part="snippet,cdn,status",
+                        body={
+                            "snippet": {"title": broadcast.title},
+                            "cdn": {"resolution": stream_format, "frameRate": "30fps", "ingestionType": "rtmp"}
+                        }
+                    ).execute()
                     stream_yt_id = stream_insert['id']
 
-                    broadcast_insert = youtube_service.liveBroadcasts().insert(part="snippet,status,contentDetails", body={"snippet": {"title": broadcast.title, "scheduledStartTime": datetime.utcnow().isoformat() + "Z"}, "status": {"privacyStatus": "public"}, "contentDetails": {"streamId": stream_yt_id, "enableAutoStart": True, "enableAutoStop": True}}).execute()
+                    # FIX: make broadcast go live immediately (not scheduled)
+                    broadcast_insert = youtube_service.liveBroadcasts().insert(
+                        part="snippet,status,contentDetails",
+                        body={
+                            "snippet": {
+                                "title": broadcast.title,
+                                "actualStartTime": datetime.utcnow().isoformat() + "Z"
+                            },
+                            "status": {"privacyStatus": "public"},
+                            "contentDetails": {
+                                "streamId": stream_yt_id,
+                                "enableAutoStart": True,
+                                "enableAutoStop": True
+                            }
+                        }
+                    ).execute()
                     youtube_broadcast_id = broadcast_insert['id']
                     broadcast.youtube_broadcast_id = youtube_broadcast_id
                     db.session.commit()
@@ -311,78 +332,4 @@ def _run_stream(app, broadcast_id):
 
             command = ['ffmpeg', '-re', '-i', video_url]
             if audio_url: command.extend(['-i', audio_url])
-            command.extend(['-c:v', 'libx264', '-preset', 'veryfast', '-vf', f"scale={settings['scale']}", '-b:v', settings['bitrate'], '-maxrate', settings['bitrate'], '-bufsize', settings['bufsize'], '-pix_fmt', 'yuv420p', '-g', '50', '-c:a', 'aac', '-b:a', '128k', '-ar', '44100'])
-            if audio_url: command.extend(['-map', '0:v:0', '-map', '1:a:0'])
-            
-            for rtmp_url in rtmp_outputs:
-                command.extend(['-f', 'flv', rtmp_url])
-            
-            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            stream_processes[broadcast.id] = process
-            
-            if youtube_service and youtube_broadcast_id:
-                time.sleep(15) # Wait for ffmpeg to establish connection
-                youtube_service.liveBroadcasts().transition(part='id,snippet,status', id=youtube_broadcast_id, broadcastStatus='live').execute()
-
-            for line in iter(process.stdout.readline, b''):
-                if not line: break
-                print(f"[FFMPEG - broadcast {broadcast.id}]: {line.decode('utf-8', errors='ignore').strip()}")
-            process.wait()
-
-        except Exception as e:
-            print(f"!!! STREAM FAILED (Broadcast ID: {broadcast.id}) !!! ERROR: {e}")
-            broadcast.status = 'failed'
-        else:
-            if process.returncode == 0:
-                print(f"--- Stream finished successfully (Broadcast ID: {broadcast.id}) ---")
-                broadcast.status = 'finished'
-            else:
-                print(f"!!! STREAM FAILED (Broadcast ID: {broadcast.id}) !!! FFMPEG exited with code: {process.returncode}")
-                broadcast.status = 'failed'
-        finally:
-            broadcast.end_time = datetime.utcnow()
-            if youtube_service and youtube_broadcast_id:
-                try:
-                    youtube_service.liveBroadcasts().transition(part='id,snippet,status', id=youtube_broadcast_id, broadcastStatus='complete').execute()
-                except HttpError: pass # It might already be complete
-            if broadcast.id in stream_processes:
-                del stream_processes[broadcast.id]
-            db.session.commit()
-
-@app.route('/api/broadcasts/<int:broadcast_id>/start', methods=['POST'])
-@jwt_required()
-def start_stream(broadcast_id):
-    broadcast = Broadcast.query.get(broadcast_id)
-    if not broadcast or str(broadcast.user_id) != get_jwt_identity() or broadcast.status != 'pending':
-        return jsonify({"error": "Broadcast not found or not pending"}), 404
-    
-    broadcast.status = 'live'
-    broadcast.start_time = datetime.utcnow()
-    db.session.commit()
-    
-    thread = threading.Thread(target=_run_stream, args=(app, broadcast_id))
-    thread.daemon = True
-    thread.start()
-    
-    return jsonify({"message": "Stream started"})
-
-@app.route('/api/broadcasts/<int:broadcast_id>/stop', methods=['POST'])
-@jwt_required()
-def stop_stream(broadcast_id):
-    process = stream_processes.get(broadcast_id)
-    if process and process.poll() is None:
-        process.terminate()
-        return jsonify({"message": "Stream stopping..."})
-    return jsonify({"message": "Stream already stopped or finished."})
-
-# --- Health Check ---
-@app.route('/')
-def status(): return jsonify({"status": "API is online"})
-
-# --- Create DB ---
-with app.app_context():
-    db.create_all()
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8000)
-
+            command.extend(['-c:v', 'libx264', '-preset', 'veryfast', '-vf',
