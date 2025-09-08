@@ -249,12 +249,13 @@ def create_broadcast():
 @jwt_required()
 def get_broadcasts():
     thirty_days_ago = datetime.utcnow() - timedelta(days=30)
-    broadcasts = Broadcast.query.filter(Broadcast.user_id == get_jwt_identity(),(Broadcast.start_time > thirty_days_ago) | (Broadcast.status == 'live') | (Broadcast.status == 'pending')).order_by(db.desc(Broadcast.id)).all()
+    broadcasts = Broadcast.query.filter(Broadcast.user_id == get_jwt_identity(),(Broadcast.start_time > thirty_days_ago) | (Broadcast.status.in_(['live', 'pending']))).order_by(db.desc(Broadcast.id)).all()
     return jsonify(broadcasts_schema.dump(broadcasts))
 
 def _run_stream(app, broadcast_id):
     with app.app_context():
         broadcast = Broadcast.query.get(broadcast_id)
+        process = None
         try:
             rtmp_outputs = []
             destination_ids = json.loads(broadcast.destination_ids_used)
@@ -277,26 +278,10 @@ def _run_stream(app, broadcast_id):
                     if not stream_format or stream_format not in ['1080p', '1440p', '2160p', '720p', '480p', '360p', '240p']:
                         stream_format = '480p'
                     
-                    ### FINAL FIX ###: Added 'frameRate' to the CDN part of the request.
-                    stream_insert = youtube.liveStreams().insert(
-                        part="snippet,cdn,status", 
-                        body={
-                            "snippet": {"title": broadcast.title}, 
-                            "cdn": {
-                                "resolution": stream_format, 
-                                "frameRate": "variable", # This was the missing piece
-                                "ingestionType": "rtmp"
-                            }
-                        }).execute()
+                    stream_insert = youtube.liveStreams().insert(part="snippet,cdn,status", body={"snippet": {"title": broadcast.title}, "cdn": {"resolution": stream_format, "frameRate": "variable", "ingestionType": "rtmp"}}).execute()
                     stream_yt_id = stream_insert['id']
 
-                    broadcast_insert = youtube.liveBroadcasts().insert(
-                        part="snippet,status,contentDetails", 
-                        body={
-                            "snippet": {"title": broadcast.title, "scheduledStartTime": datetime.utcnow().isoformat() + "Z"}, 
-                            "status": {"privacyStatus": "private"}, 
-                            "contentDetails": {"streamId": stream_yt_id, "enableAutoStart": True, "enableAutoStop": True}
-                        }).execute()
+                    broadcast_insert = youtube.liveBroadcasts().insert(part="snippet,status,contentDetails", body={"snippet": {"title": broadcast.title, "scheduledStartTime": datetime.utcnow().isoformat() + "Z"}, "status": {"privacyStatus": "private"}, "contentDetails": {"streamId": stream_yt_id, "enableAutoStart": True, "enableAutoStop": True}}).execute()
                     
                     ingestion_address = stream_insert['cdn']['ingestionInfo']['ingestionAddress']
                     stream_name = stream_insert['cdn']['ingestionInfo']['streamName']
@@ -317,7 +302,7 @@ def _run_stream(app, broadcast_id):
             settings = {'scale': '854:480', 'bitrate': '900k', 'bufsize': '1800k'}
             if broadcast.resolution == '720p': settings = {'scale': '1280:720', 'bitrate': '1800k', 'bufsize': '3600k'}
 
-            command = ['ffmpeg', '-re', '-i', video_url]
+            command = ['ffmpeg', '-fflags', '+genpts', '-re', '-stream_loop', '-1', '-i', video_url]
             if audio_url: command.extend(['-i', audio_url])
             command.extend(['-c:v', 'libx264', '-preset', 'veryfast', '-vf', f"scale={settings['scale']}", '-b:v', settings['bitrate'], '-maxrate', settings['bitrate'], '-bufsize', settings['bufsize'], '-pix_fmt', 'yuv420p', '-g', '50', '-c:a', 'aac', '-b:a', '128k', '-ar', '44100'])
             if audio_url: command.extend(['-map', '0:v:0', '-map', '1:a:0'])
@@ -325,11 +310,12 @@ def _run_stream(app, broadcast_id):
             for rtmp_url in rtmp_outputs:
                 command.extend(['-f', 'flv', rtmp_url])
             
-            process = subprocess.Popen(command, stderr=subprocess.PIPE, text=True)
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             stream_processes[broadcast_id] = process
             
-            for line in iter(process.stderr.readline, ''):
-                print(f"[FFMPEG - broadcast {broadcast_id}]: {line.strip()}")
+            for line in iter(process.stdout.readline, b''):
+                if not line: break
+                print(f"[FFMPEG - broadcast {broadcast_id}]: {line.decode('utf-8', errors='ignore').strip()}")
             
             process.wait()
 
@@ -340,11 +326,11 @@ def _run_stream(app, broadcast_id):
             if process.returncode == 0:
                 print(f"--- Stream finished successfully (Broadcast ID: {broadcast_id}) ---")
                 broadcast.status = 'finished'
-                broadcast.end_time = datetime.utcnow()
             else:
                 print(f"!!! STREAM FAILED (Broadcast ID: {broadcast_id}) !!! FFMPEG exited with code: {process.returncode}")
                 broadcast.status = 'failed'
         finally:
+            broadcast.end_time = datetime.utcnow()
             if broadcast_id in stream_processes:
                 del stream_processes[broadcast_id]
             db.session.commit()
