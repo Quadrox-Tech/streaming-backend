@@ -17,7 +17,6 @@ from google.oauth2.credentials import Credentials
 import requests
 import uuid
 import json
-import time
 import threading
 
 # --- App Initialization & Config ---
@@ -55,7 +54,7 @@ class Destination(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     platform = db.Column(db.String(100), nullable=False)
     name = db.Column(db.String(100), nullable=False)
-    stream_key = db.Column(db.String(200), nullable=False)
+    stream_key = db.Column(db.String(200), nullable=False) # For custom RTMP, this is the full URL
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
 
 class Video(db.Model):
@@ -98,28 +97,18 @@ class BroadcastSchema(ma.SQLAlchemyAutoSchema):
 user_schema=UserSchema(); destinations_schema=DestinationSchema(many=True); connected_account_schema = ConnectedAccountSchema(many=True); single_destination_schema=DestinationSchema(); video_schema=VideoSchema(many=True); broadcasts_schema=BroadcastSchema(many=True); single_broadcast_schema = BroadcastSchema()
 
 # --- Auth Endpoints ---
-### FIX ###: Correctly hashes the password on registration.
 @app.route('/api/auth/register', methods=['POST'])
 def register_user():
-    data = request.get_json()
-    full_name = data.get('full_name')
-    email = data.get('email')
-    password = data.get('password')
+    data = request.get_json(); full_name = data.get('full_name'); email = data.get('email'); password = data.get('password')
     if not all([full_name, email, password]): return jsonify({"error": "All fields are required"}), 400
     if User.query.filter_by(email=email).first(): return jsonify({"error": "Email already exists"}), 409
-    
     password_hash = bcrypt.generate_password_hash(password).decode('utf-8')
-    new_user = User(full_name=full_name, email=email, password_hash=password_hash)
-    db.session.add(new_user)
-    db.session.commit()
+    new_user = User(full_name=full_name, email=email, password_hash=password_hash); db.session.add(new_user); db.session.commit()
     return jsonify({"message": "User registered successfully"}), 201
 
-### FIX ###: Correctly checks the hashed password on login.
 @app.route('/api/auth/login', methods=['POST'])
 def login_user():
-    data = request.get_json()
-    email = data.get('email')
-    password = data.get('password')
+    data = request.get_json(); email = data.get('email'); password = data.get('password')
     if not email or not password: return jsonify({"error": "Email and password required"}), 400
     user = User.query.filter_by(email=email).first()
     if user and user.password_hash and bcrypt.check_password_hash(user.password_hash, password):
@@ -321,17 +310,27 @@ def _run_stream(app, broadcast_id):
             for rtmp_url in rtmp_outputs:
                 command.extend(['-f', 'flv', rtmp_url])
             
-            process = subprocess.Popen(command) # Let output go to main log
+            # This is the crucial part for debugging. We capture stderr.
+            process = subprocess.Popen(command, stderr=subprocess.PIPE, text=True)
             stream_processes[broadcast_id] = process
-            process.wait() # Wait for FFmpeg to finish
+            
+            # Log ffmpeg's output line by line
+            for line in iter(process.stderr.readline, ''):
+                print(f"[FFMPEG - broadcast {broadcast_id}]: {line.strip()}")
+            
+            process.wait()
 
         except Exception as e:
             print(f"!!! STREAM FAILED (Broadcast ID: {broadcast_id}) !!! ERROR: {e}")
             broadcast.status = 'failed'
         else:
-            print(f"--- Stream finished successfully (Broadcast ID: {broadcast_id}) ---")
-            broadcast.status = 'finished'
-            broadcast.end_time = datetime.utcnow()
+            if process.returncode == 0:
+                print(f"--- Stream finished successfully (Broadcast ID: {broadcast_id}) ---")
+                broadcast.status = 'finished'
+                broadcast.end_time = datetime.utcnow()
+            else:
+                print(f"!!! STREAM FAILED (Broadcast ID: {broadcast_id}) !!! FFMPEG exited with code: {process.returncode}")
+                broadcast.status = 'failed'
         finally:
             if broadcast_id in stream_processes:
                 del stream_processes[broadcast_id]
@@ -348,7 +347,6 @@ def start_stream(broadcast_id):
     broadcast.start_time = datetime.utcnow()
     db.session.commit()
     
-    # Run the stream in a background thread
     thread = threading.Thread(target=_run_stream, args=(app, broadcast_id))
     thread.daemon = True
     thread.start()
