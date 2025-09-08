@@ -96,12 +96,12 @@ class VideoSchema(ma.SQLAlchemyAutoSchema):
 class BroadcastSchema(ma.SQLAlchemyAutoSchema):
     class Meta: model = Broadcast; include_fk = True
 
-user_schema=UserSchema()
-destinations_schema=DestinationSchema(many=True)
+user_schema = UserSchema()
+destinations_schema = DestinationSchema(many=True)
 connected_account_schema = ConnectedAccountSchema(many=True)
-single_destination_schema=DestinationSchema()
-video_schema=VideoSchema(many=True)
-broadcasts_schema=BroadcastSchema(many=True)
+single_destination_schema = DestinationSchema()
+video_schema = VideoSchema(many=True)
+broadcasts_schema = BroadcastSchema(many=True)
 single_broadcast_schema = BroadcastSchema()
 
 # --- Auth Endpoints ---
@@ -418,7 +418,6 @@ def _run_stream(app, broadcast_id):
                     rtmp_outputs.append(f"{ingestion_address}/{stream_name}")
 
             if not rtmp_outputs:
-                broadcast.status = 'failed'; db.session.commit()
+                broadcast.status = 'failed'
+                db.session.commit()
                 return
-
-          return video_url, audio
