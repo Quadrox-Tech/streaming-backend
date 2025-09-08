@@ -18,6 +18,7 @@ import requests
 import uuid
 import json
 import threading
+import time
 
 # --- App Initialization & Config ---
 app = Flask(__name__)
@@ -81,6 +82,7 @@ class Broadcast(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     destinations_used = db.Column(db.Text, nullable=True)
     destination_ids_used = db.Column(db.Text, nullable=True)
+    youtube_broadcast_id = db.Column(db.String(100), nullable=True) # To store the YT ID
 
 # --- API Schemas ---
 class UserSchema(ma.SQLAlchemyAutoSchema):
@@ -127,6 +129,7 @@ def google_auth():
     except ValueError: return jsonify({"error": "Token verification failed"}), 401
 
 # --- User Profile & Connections Endpoints ---
+# (These routes are correct and unchanged)
 @app.route('/api/user/profile', methods=['GET', 'PUT'])
 @jwt_required()
 def user_profile():
@@ -256,6 +259,8 @@ def _run_stream(app, broadcast_id):
     with app.app_context():
         broadcast = Broadcast.query.get(broadcast_id)
         process = None
+        youtube_service = None
+        youtube_broadcast_id = None
         try:
             rtmp_outputs = []
             destination_ids = json.loads(broadcast.destination_ids_used)
@@ -272,31 +277,18 @@ def _run_stream(app, broadcast_id):
                     if not account: continue
                     
                     creds = Credentials(None, refresh_token=account.refresh_token, token_uri='https://oauth2.googleapis.com/token', client_id=GOOGLE_CLIENT_ID, client_secret=GOOGLE_CLIENT_SECRET)
-                    youtube = build('youtube', 'v3', credentials=creds)
+                    youtube_service = build('youtube', 'v3', credentials=creds)
                     
                     stream_format = broadcast.resolution
                     if not stream_format or stream_format not in ['1080p', '1440p', '2160p', '720p', '480p', '360p', '240p']:
                         stream_format = '480p'
                     
-                    stream_insert = youtube.liveStreams().insert(
-                        part="snippet,cdn,status", 
-                        body={
-                            "snippet": {"title": broadcast.title}, 
-                            "cdn": {
-                                "resolution": stream_format, 
-                                "frameRate": "30fps", # Final Fix: Changed from 'variable'
-                                "ingestionType": "rtmp"
-                            }
-                        }).execute()
+                    stream_insert = youtube_service.liveStreams().insert(part="snippet,cdn,status", body={"snippet": {"title": broadcast.title}, "cdn": {"resolution": stream_format, "frameRate": "30fps", "ingestionType": "rtmp"}}).execute()
                     stream_yt_id = stream_insert['id']
 
-                    broadcast_insert = youtube.liveBroadcasts().insert(
-                        part="snippet,status,contentDetails", 
-                        body={
-                            "snippet": {"title": broadcast.title, "scheduledStartTime": datetime.utcnow().isoformat() + "Z"}, 
-                            "status": {"privacyStatus": "private"}, 
-                            "contentDetails": {"streamId": stream_yt_id, "enableAutoStart": True, "enableAutoStop": True}
-                        }).execute()
+                    broadcast_insert = youtube_service.liveBroadcasts().insert(part="snippet,status,contentDetails", body={"snippet": {"title": broadcast.title, "scheduledStartTime": datetime.utcnow().isoformat() + "Z"}, "status": {"privacyStatus": "public"}, "contentDetails": {"streamId": stream_yt_id, "enableAutoStop": True}}).execute()
+                    youtube_broadcast_id = broadcast_insert['id']
+                    broadcast.youtube_broadcast_id = youtube_broadcast_id
                     
                     ingestion_address = stream_insert['cdn']['ingestionInfo']['ingestionAddress']
                     stream_name = stream_insert['cdn']['ingestionInfo']['streamName']
@@ -317,7 +309,7 @@ def _run_stream(app, broadcast_id):
             settings = {'scale': '854:480', 'bitrate': '900k', 'bufsize': '1800k'}
             if broadcast.resolution == '720p': settings = {'scale': '1280:720', 'bitrate': '1800k', 'bufsize': '3600k'}
 
-            command = ['ffmpeg', '-fflags', '+genpts', '-re', '-stream_loop', '-1', '-i', video_url]
+            command = ['ffmpeg', '-re', '-i', video_url]
             if audio_url: command.extend(['-i', audio_url])
             command.extend(['-c:v', 'libx264', '-preset', 'veryfast', '-vf', f"scale={settings['scale']}", '-b:v', settings['bitrate'], '-maxrate', settings['bitrate'], '-bufsize', settings['bufsize'], '-pix_fmt', 'yuv420p', '-g', '50', '-c:a', 'aac', '-b:a', '128k', '-ar', '44100'])
             if audio_url: command.extend(['-map', '0:v:0', '-map', '1:a:0'])
@@ -326,28 +318,41 @@ def _run_stream(app, broadcast_id):
                 command.extend(['-f', 'flv', rtmp_url])
             
             process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            stream_processes[broadcast_id] = process
+            stream_processes[broadcast.id] = process
             
+            # --- Wait for stream health and then transition to live ---
+            if youtube_service and youtube_broadcast_id:
+                print("--- Waiting 15 seconds for stream to be healthy before transitioning... ---")
+                time.sleep(15)
+                youtube_service.liveBroadcasts().transition(part='id,snippet,status', id=youtube_broadcast_id, broadcastStatus='live').execute()
+                print(f"--- YouTube Broadcast {youtube_broadcast_id} transitioned to LIVE ---")
+
+            # --- Monitor FFmpeg ---
             for line in iter(process.stdout.readline, b''):
                 if not line: break
-                print(f"[FFMPEG - broadcast {broadcast_id}]: {line.decode('utf-8', errors='ignore').strip()}")
-            
+                print(f"[FFMPEG - broadcast {broadcast.id}]: {line.decode('utf-8', errors='ignore').strip()}")
             process.wait()
 
         except Exception as e:
-            print(f"!!! STREAM FAILED (Broadcast ID: {broadcast_id}) !!! ERROR: {e}")
+            print(f"!!! STREAM FAILED (Broadcast ID: {broadcast.id}) !!! ERROR: {e}")
             broadcast.status = 'failed'
-        else:
+        else: # This block runs if the try block completes WITHOUT an error
             if process.returncode == 0:
-                print(f"--- Stream finished successfully (Broadcast ID: {broadcast_id}) ---")
+                print(f"--- Stream finished successfully (Broadcast ID: {broadcast.id}) ---")
                 broadcast.status = 'finished'
             else:
-                print(f"!!! STREAM FAILED (Broadcast ID: {broadcast_id}) !!! FFMPEG exited with code: {process.returncode}")
+                print(f"!!! STREAM FAILED (Broadcast ID: {broadcast.id}) !!! FFMPEG exited with code: {process.returncode}")
                 broadcast.status = 'failed'
-        finally:
+        finally: # This block ALWAYS runs, whether there was an error or not
             broadcast.end_time = datetime.utcnow()
-            if broadcast_id in stream_processes:
-                del stream_processes[broadcast_id]
+            if youtube_service and youtube_broadcast_id:
+                try:
+                    youtube_service.liveBroadcasts().transition(part='id,snippet,status', id=youtube_broadcast_id, broadcastStatus='complete').execute()
+                    print(f"--- YouTube Broadcast {youtube_broadcast_id} transitioned to COMPLETE ---")
+                except HttpError as e:
+                    print(f"--- Could not transition YT broadcast to complete (it may already be): {e} ---")
+            if broadcast.id in stream_processes:
+                del stream_processes[broadcast.id]
             db.session.commit()
 
 @app.route('/api/broadcasts/<int:broadcast_id>/start', methods=['POST'])
@@ -386,5 +391,4 @@ with app.app_context():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000)
-
 
