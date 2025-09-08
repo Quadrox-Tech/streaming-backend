@@ -17,7 +17,7 @@ import json
 import threading
 import time
 
-# --- App Config (Unchanged) ---
+# --- App Config ---
 app = Flask(__name__)
 CORS(app)
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///db.sqlite3')
@@ -36,7 +36,7 @@ jwt = JWTManager(app)
 stream_processes = {}
 oauth_states = {}
 
-# --- Database Models & Schemas (Unchanged) ---
+# --- Database Models & Schemas ---
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     full_name = db.Column(db.String(100), nullable=False)
@@ -87,7 +87,7 @@ class BroadcastSchema(ma.SQLAlchemyAutoSchema):
     class Meta: model = Broadcast; include_fk = True
 user_schema=UserSchema(); destinations_schema=DestinationSchema(many=True); connected_account_schema = ConnectedAccountSchema(many=True); single_destination_schema=DestinationSchema(); video_schema=VideoSchema(many=True); broadcasts_schema=BroadcastSchema(many=True); single_broadcast_schema = BroadcastSchema()
 
-# --- All API Endpoints (Unchanged from original version) ---
+# --- API Endpoints ---
 @app.route('/api/auth/register', methods=['POST'])
 def register_user():
     data = request.get_json(); full_name = data.get('full_name'); email = data.get('email'); password = data.get('password')
