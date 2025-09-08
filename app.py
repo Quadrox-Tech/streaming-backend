@@ -345,8 +345,6 @@ def _run_stream(app, broadcast_id):
                 try:
                     result = subprocess.run(yt_dlp_cmd, capture_output=True, text=True, check=True, timeout=60)
                     
-                    # *** THE SAFEGUARD ***
-                    # Check if yt-dlp actually returned something. If not, fail gracefully.
                     if not result.stdout or not result.stdout.strip():
                         raise Exception("yt-dlp ran successfully but returned no media URLs. The video might be private, region-locked, or otherwise inaccessible.")
 
@@ -354,7 +352,6 @@ def _run_stream(app, broadcast_id):
                     video_url = urls[0]; audio_url = urls[1] if len(urls) > 1 else None
                     print(f"--- [Broadcast {broadcast.id}] yt-dlp successful. Got media URLs. ---")
                 except subprocess.CalledProcessError as e:
-                    # This catches if yt-dlp exits with an error code
                     print(f"!!! YT-DLP FAILED (Broadcast {broadcast.id}) !!!")
                     print(f"Return Code: {e.returncode}")
                     print(f"Error Output from yt-dlp: {e.stderr}")
@@ -385,11 +382,12 @@ def _run_stream(app, broadcast_id):
                 print(f"--- [Broadcast {broadcast.id}] Began sending video. Monitoring health for broadcast: {youtube_broadcast_id_str} ---")
                 for i in range(30): 
                     time.sleep(5)
+                    # *** YOUR SUGGESTION IMPLEMENTED HERE ***
+                    # Check if FFmpeg died. If so, log the error and stop the process.
                     if process.poll() is not None:
-                        # FFmpeg died, read its error output to find out why
-                        stdout, stderr = process.communicate()
+                        stdout, stderr = process.communicate() # Get final error output
                         print(f"!!! FFMPEG DIED UNEXPECTEDLY (Broadcast {broadcast.id}) !!!")
-                        print(f"FFmpeg Error Output:\n{stderr.decode('utf-8', errors='ignore')}")
+                        print(f"FFmpeg stderr:\n{stderr.decode('utf-8', errors='ignore')}")
                         raise Exception(f"FFmpeg process terminated unexpectedly with code {process.returncode} during health check.")
 
                     broadcast_list_response = youtube_service.liveBroadcasts().list(part="status",id=youtube_broadcast_id_str).execute()
@@ -407,11 +405,12 @@ def _run_stream(app, broadcast_id):
                 else: 
                     raise Exception("YouTube stream health check timed out. Stream never became healthy.")
             
+            # Wait for FFmpeg to finish naturally (e.g., end of video file)
             stdout, stderr = process.communicate()
             if process.returncode != 0:
                 print(f"!!! FFMPEG EXITED WITH ERROR (Broadcast {broadcast.id}) !!!")
                 print(f"Return Code: {process.returncode}")
-                print(f"FFmpeg Error Output:\n{stderr.decode('utf-8', errors='ignore')}")
+                print(f"FFmpeg stderr:\n{stderr.decode('utf-8', errors='ignore')}")
 
         except Exception as e:
             print(f"!!! STREAM FAILED (Broadcast ID: {broadcast.id}) !!!\nERROR: {e}\n")
