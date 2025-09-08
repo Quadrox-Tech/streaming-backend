@@ -11,13 +11,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# *** THE FIX ***
-# Copy the cookies file into the container so yt-dlp can use it.
+# This copies your new, valid cookies file into the server
 COPY cookies.txt /app/cookies.txt
 
 COPY . .
 
 EXPOSE 8000
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:app"]
+CMD ["gunicorn", "--bind", "0.toString()0.0:8000", "app:app"]
 
 
