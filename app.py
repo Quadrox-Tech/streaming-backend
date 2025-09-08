@@ -82,7 +82,6 @@ class Broadcast(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     destinations_used = db.Column(db.Text, nullable=True)
     destination_ids_used = db.Column(db.Text, nullable=True)
-    ### FINAL FIX PART 1 ###: Added column to store the YouTube Broadcast ID
     youtube_broadcast_id = db.Column(db.String(100), nullable=True)
 
 # --- API Schemas ---
@@ -255,7 +254,6 @@ def get_broadcasts():
     broadcasts = Broadcast.query.filter(Broadcast.user_id == get_jwt_identity(),(Broadcast.start_time > thirty_days_ago) | (Broadcast.status.in_(['live', 'pending']))).order_by(db.desc(Broadcast.id)).all()
     return jsonify(broadcasts_schema.dump(broadcasts))
 
-### FINAL FIX PART 2 ###: The entire _run_stream function is rewritten to use the correct API workflow.
 def _run_stream(app, broadcast_id):
     with app.app_context():
         broadcast = Broadcast.query.get(broadcast_id)
@@ -323,18 +321,23 @@ def _run_stream(app, broadcast_id):
             stream_processes[broadcast.id] = process
             
             if youtube_service and youtube_broadcast_id_str:
-                for _ in range(24): # Try for up to 2 minutes
+                print(f"--- Began sending video to YouTube. Now monitoring health for broadcast: {youtube_broadcast_id_str} ---")
+                for _ in range(30): # Poll for up to 2.5 minutes
                     time.sleep(5)
-                    broadcast_status_res = youtube_service.liveBroadcasts().list(part='snippet,status', id=youtube_broadcast_id_str).execute()
-                    if broadcast_status_res['items']:
-                        life_cycle = broadcast_status_res['items'][0]['status']['lifeCycleStatus']
-                        print(f"--- [YT Health Check] Broadcast '{youtube_broadcast_id_str}' status is: {life_cycle} ---")
-                        if life_cycle == 'testing' or life_cycle == 'live':
-                            youtube_service.liveBroadcasts().transition(part='id', id=youtube_broadcast_id_str, broadcastStatus='live').execute()
-                            print(f"--- YouTube Broadcast {youtube_broadcast_id_str} transitioned to LIVE ---")
-                            break
+                    broadcast_list_response = youtube_service.liveBroadcasts().list(part="status",id=youtube_broadcast_id_str).execute()
+                    if not broadcast_list_response["items"]:
+                        raise Exception("YouTube broadcast disappeared during health check.")
+                    
+                    health_status = broadcast_list_response["items"][0]["status"].get("healthStatus", {}).get("status")
+                    print(f"--- [YT Health Check] Current health: {health_status} ---")
+                    
+                    if health_status == 'good':
+                        print("--- Stream health is GOOD. Transitioning to live... ---")
+                        youtube_service.liveBroadcasts().transition(part="id",id=youtube_broadcast_id_str,broadcastStatus="live").execute()
+                        print(f"--- YouTube Broadcast {youtube_broadcast_id_str} successfully transitioned to LIVE ---")
+                        break
                 else:
-                    print("--- YouTube stream never became ready for transition. ---")
+                    raise Exception("YouTube stream health check timed out.")
             
             for line in iter(process.stdout.readline, b''):
                 if not line: break
